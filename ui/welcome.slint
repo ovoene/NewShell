@@ -1,0 +1,645 @@
+import { Theme } from "theme.slint";
+import { PrimaryButton, GhostButton } from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct SessionInfo {
+    id: string,
+    name: string,
+    host: string,
+    port: int,
+    user: string,
+    auth: string,      // "password" | "key"
+    last-used: string, // ISO timestamp or "never"
+    group: string,        // folder/group name ("" = ungrouped)
+    group-header: string, // set on the first row of each group → render a header
+    collapsed: bool,      // group is collapsed → this session row is hidden
+    note: string,         // free-text note ("备注")
+    added-date: string,   // date the session was added ("添加日期"), YYYY-MM-DD
+}
+
+// --- SessionRow ------------------------------------------------------------
+component SessionRow inherits Rectangle {
+    in property <SessionInfo> session;
+    // Compact = narrow docked/flyout mode → tighten column widths so the IP
+    // column isn't crowded out by the fixed-width name/host columns (#quick2c).
+    in property <bool> compact;
+    callback connect();
+    // Right-click → ask the parent (Welcome) to open its shared inline context
+    // menu at the given absolute position. A nested PopupWindow here breaks
+    // inside a close-on-click-outside flyout, so the menu lives in Welcome
+    // instead (#quick2a/2b). Coordinates are absolute so Welcome can translate
+    // them into its own local space.
+    callback open-menu(length /* abs-x */, length /* abs-y */);
+    property <bool> system-row: root.session.group == "system";
+
+    height: 36px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.bg-hover : transparent;
+    animate background { duration: 120ms; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.connect(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.open-menu(self.absolute-position.x + self.mouse-x,
+                               self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
+    // Row content ------------------------------------------------------------
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Rectangle {
+            width: 18px; height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            background: Theme.bg-elevated;
+            Text {
+                text: root.system-row ? "\u{E30A}" : "\u{E875}";   // terminal / server
+                font-family: "Material Icons";
+                color: Theme.text-secondary;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: session.name;
+            color: Theme.text-primary;
+            font-size: Theme.fs-md;
+            vertical-alignment: center;
+            // Narrow flyout: cap the name so the host/IP column keeps room to
+            // render in full instead of being squeezed off-screen (#quick2c).
+            width: root.compact ? 96px : 180px;
+            overflow: elide;
+        }
+        Text {
+            text: session.port > 0 ? session.host + ":" + session.port : session.host;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            // Let the IP take the remaining width in compact mode so it shows in
+            // full; keep the original fixed column on the wide welcome page.
+            width: root.compact ? 0px : 180px;
+            horizontal-stretch: root.compact ? 1 : 0;
+            overflow: elide;
+        }
+        // The username, note and added-date columns are dropped in the narrow
+        // flyout so the IP has room to breathe; they stay on the full-width
+        // welcome page (request #5: 名称 / IP / 用户 / 备注 / 添加日期).
+        if !root.compact : Text {
+            text: session.user;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            width: 140px;
+            overflow: elide;
+        }
+        if !root.compact : Text {
+            text: session.note;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if !root.compact : Text {
+            text: session.added-date;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            width: 100px;
+            overflow: elide;
+        }
+    }
+}
+
+component CollapseButton inherits Rectangle {
+    in property <string> glyph;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Theme.bg-hover : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.glyph;
+        font-family: "Material Icons";
+        color: Theme.text-secondary;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// --- Welcome ---------------------------------------------------------------
+export component Welcome inherits Rectangle {
+    in property <[SessionInfo]> sessions;
+    // A single inspirational line shown in place of the old app title/tagline.
+    // Rust picks one at random each launch and passes it down.
+    in property <string> hero-quote;
+    callback new-session();
+    callback connect-session(string);
+    callback edit-session(string);
+    callback duplicate-session(string);
+    callback move-session(string /* id */, string /* group */);
+    callback toggle-group(string /* group */);
+    callback new-group();
+    callback edit-group(string /* current-name */);
+    callback delete-group(string /* name */);
+    callback remove-session(string);
+    callback cycle-tab(bool /* reverse */);
+    // Compact mode (welcome-as-sidebar): drop the big title/tagline header and
+    // tighten padding so the session list fits a narrow docked panel (#v0.5).
+    in property <bool> compact;
+    in property <string> dock-edge: "left";
+    in property <bool> draggable: true;   // when false (e.g. inside a non-movable popup), the header is not draggable
+    property <bool> dock-horizontal: root.dock-edge == "left" || root.dock-edge == "right";
+    // Collapse the sidebar to the edge icon strip (compact mode only) (#v0.5 M5).
+    callback collapse();
+    callback dock-drag-move(length, length);
+    callback dock-drag-end();
+
+    // Shared inline context menu (replaces the per-row nested PopupWindow that
+    // broke inside the close-on-click-outside quick-connect flyout) (#quick2a/2b).
+    property <bool> menu-open;
+    property <SessionInfo> menu-session;
+    property <length> menu-x;
+    property <length> menu-y;
+    // Group-header context menu — same inline pattern as the session menu above,
+    // so right-clicking a folder header works inside the flyout too (#quick2a/2b).
+    property <bool> gmenu-open;
+    property <string> gmenu-group;
+    property <bool> gmenu-empty;   // group has no sessions → allow delete
+    property <length> gmenu-x;
+    property <length> gmenu-y;
+
+    background: Theme.bg-root;
+
+    // The regular welcome page is itself a tab. When Ctrl+Tab wraps from the
+    // last terminal to this page, keep the shortcut chain alive so the next
+    // press can continue to the first terminal (#294). The compact welcome
+    // sidebar must never take focus away from an active terminal.
+    if !root.compact : FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if ((Theme.is-mac ? event.modifiers.meta : event.modifiers.control)
+                    && (event.text == Key.Tab || event.text == Key.Backtab)) {
+                root.cycle-tab(event.modifiers.shift || event.text == Key.Backtab);
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: root.compact ? 12px : 24px;
+        spacing: root.compact ? 12px : 20px;
+
+        // Header — a single random inspirational line (replaces the old
+        // "newshell" title + tagline). Pinned to the top at its natural
+        // height. Hidden in compact/sidebar mode.
+        if !root.compact : VerticalLayout {
+            vertical-stretch: 0;
+            alignment: start;
+            spacing: 4px;
+            Text {
+                text: root.hero-quote;
+                color: Theme.text-primary;
+                font-size: Theme.fs-lg;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+        }
+
+        // Quick Connect card — always fills the remaining height so the panel
+        // doesn't jump when the first session is added (the empty placeholder
+        // stretches to fill just like the session list does) (#214).
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Rectangle {
+                    height: header-row.preferred-height;
+                    TouchArea {
+                        enabled: root.compact && root.draggable;
+                        mouse-cursor: root.draggable ? move : default;
+                        moved => {
+                            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                                self.absolute-position.y + self.mouse-y);
+                        }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                        }
+                    }
+                    header-row := HorizontalLayout {
+                        spacing: 8px;
+                        if root.compact && root.dock-edge != "left" : CollapseButton {
+                            glyph: root.dock-edge == "right" ? "\u{E5CC}"
+                                 : root.dock-edge == "top" ? "\u{E5CE}"
+                                 : "\u{E5CF}";
+                            clicked => { root.collapse(); }
+                        }
+                        Text {
+                            text: @tr("Quick connect");
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-lg;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if root.compact && root.dock-edge == "left" : CollapseButton {
+                            glyph: "\u{E5CB}";
+                            clicked => { root.collapse(); }
+                        }
+                        if !root.compact : PrimaryButton {
+                            text: @tr("+ New session");
+                            clicked => { root.new-session(); }
+                        }
+                    }
+                }
+                if root.compact : PrimaryButton {
+                    text: @tr("+ New session");
+                    clicked => { root.new-session(); }
+                }
+
+                if sessions.length == 0 : Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.bg-root;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text {
+                            text: @tr("No sessions yet");
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-md;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: @tr("Use 'New session' (top-right) to add your first server");
+                            color: Theme.text-muted;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                if sessions.length > 0 : ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    viewport-height: max(self.visible-height, sess-list.preferred-height);
+                    sess-list := VerticalLayout {
+                    spacing: 2px;
+                    for session[i] in sessions : VerticalLayout {
+                        spacing: 2px;
+                        // Group header on the first row of each group (#41).
+                        // Click anywhere on it to collapse / expand the group.
+                        if session.group-header != "" : Rectangle {
+                            height: 26px;
+                            HorizontalLayout {
+                                padding-top: 6px;
+                                padding-left: 4px;
+                                spacing: 4px;
+                                // Collapse chevron — shown for every group, empty
+                                // folders included, so they line up and can be
+                                // toggled (an empty group just expands to nothing).
+                                Text {
+                                    text: session.collapsed ? "\u{E5CC}" : "\u{E5CF}";
+                                    font-family: "Material Icons";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: "\u{E2C7}";   // folder glyph
+                                    font-family: "Material Icons";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: session.group-header;
+                                    // Was text-muted @ fs-xs — too faint against a
+                                    // light background to read as a section label
+                                    // (#light-contrast). text-secondary reads clearly
+                                    // in both themes while staying lighter than the
+                                    // session rows below it.
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;       // fill → text stays left
+                                    horizontal-alignment: left;
+                                }
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                // Left-click toggles collapse (any group, incl.
+                                // empty); right-click opens the inline group menu.
+                                clicked => { root.toggle-group(session.group); }
+                                pointer-event(e) => {
+                                    if (session.group != "system" && e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                        root.gmenu-group = session.group;
+                                        root.gmenu-empty = (session.id == "");
+                                        // Absolute click point → Welcome-local coords.
+                                        root.gmenu-x = self.absolute-position.x + self.mouse-x - root.absolute-position.x;
+                                        root.gmenu-y = self.absolute-position.y + self.mouse-y - root.absolute-position.y;
+                                        root.gmenu-open = true;
+                                    }
+                                }
+                            }
+                        }
+                        // Column-header row for each group (#quick-colnames).
+                        // Rendered only when the group is expanded; hidden when
+                        // collapsed. Mirrors SessionRow's column widths & the
+                        // compact-mode column dropping so labels line up with the
+                        // data below them.
+                        if session.group-header != "" && !session.collapsed : Rectangle {
+                            // Fixed height so the header row isn't stretched to fill
+                            // the ScrollView viewport (#quick-colnames-fix). A bare
+                            // HorizontalLayout here would grow vertically and float
+                            // the labels into the middle of the empty list area.
+                            height: 22px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 12px;
+                                // Spacer matching the 18px icon column in SessionRow.
+                                Rectangle { width: 18px; }
+                                Text {
+                                    text: @tr("Name");
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                    width: root.compact ? 96px : 180px;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: @tr("IP");
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                    width: root.compact ? 0px : 180px;
+                                    horizontal-stretch: root.compact ? 1 : 0;
+                                    overflow: elide;
+                                }
+                                if !root.compact : Text {
+                                    text: @tr("Login identity");
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                    width: 140px;
+                                    overflow: elide;
+                                }
+                                if !root.compact : Text {
+                                    text: @tr("Note");
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                if !root.compact : Text {
+                                    text: @tr("Added date");
+                                    color: Theme.text-muted;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                    width: 100px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        if session.id != "" && !session.collapsed : SessionRow {
+                            session: session;
+                            compact: root.compact;
+                            connect => { root.connect-session(session.id); }
+                            open-menu(ax, ay) => {
+                                root.menu-session = session;
+                                // Translate the absolute click point into Welcome's
+                                // local coordinates so the inline menu lands under
+                                // the cursor.
+                                root.menu-x = ax - root.absolute-position.x;
+                                root.menu-y = ay - root.absolute-position.y;
+                                root.menu-open = true;
+                            }
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+
+    // Shared inline context menu — rendered at the Welcome root so a click on it
+    // counts as an "inside" click and does not dismiss the quick-connect flyout,
+    // and so its own handlers run reliably (#quick2a/2b).
+    if root.menu-open : Rectangle {
+        // Full-panel backdrop: any click outside the menu closes it.
+        backdrop := TouchArea {
+            clicked => { root.menu-open = false; }
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                    root.menu-open = false;
+                }
+            }
+        }
+        Rectangle {
+            x: min(root.menu-x, root.width - self.width - 4px);
+            y: min(root.menu-y, root.height - self.height - 4px);
+            width: 160px;
+            height: menu-col.preferred-height;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000050;
+            menu-col := VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+                // Edit session
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-edit.has-hover ? Theme.bg-hover : transparent;
+                    mi-edit := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.menu-open = false; root.edit-session(root.menu-session.id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("Edit session"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                // Duplicate
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-dup.has-hover ? Theme.bg-hover : transparent;
+                    mi-dup := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.menu-open = false; root.duplicate-session(root.menu-session.id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E14D}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("Duplicate"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                // Move to — one entry per existing group, plus "default" for
+                // ungrouped. Skips the session's current group.
+                Rectangle {
+                    height: 22px;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-top: 4px;
+                        Text { text: @tr("Move to"); color: Theme.text-muted; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                if root.menu-session.group != "" : Rectangle {
+                    height: 26px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-def.has-hover ? Theme.bg-hover : transparent;
+                    mi-def := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.menu-open = false; root.move-session(root.menu-session.id, ""); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 18px; spacing: 8px;
+                        Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("leave empty → default"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                for g[gi] in root.sessions : Rectangle {
+                    property <bool> can-move: g.group-header != "" && g.group != "system" && g.group != root.menu-session.group;
+                    height: can-move ? 26px : 0px;
+                    visible: can-move;
+                    clip: true;
+                    border-radius: Theme.radius-sm;
+                    background: mi-grp.has-hover ? Theme.bg-hover : transparent;
+                    mi-grp := TouchArea {
+                        mouse-cursor: pointer;
+                        enabled: can-move;
+                        clicked => { root.menu-open = false; root.move-session(root.menu-session.id, g.group); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 18px; spacing: 8px;
+                        Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: g.group-header; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    }
+                }
+                // Delete
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-del.has-hover ? #cc333320 : transparent;
+                    mi-del := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.menu-open = false; root.remove-session(root.menu-session.id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("Delete"); color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+            }
+        }
+    }
+
+    // Inline group (folder) context menu — same pattern as the session menu, so a
+    // right-click on a folder header inside the quick-connect flyout works and the
+    // menu no longer self-dismisses (#quick2a/2b).
+    if root.gmenu-open : Rectangle {
+        gbackdrop := TouchArea {
+            clicked => { root.gmenu-open = false; }
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                    root.gmenu-open = false;
+                }
+            }
+        }
+        Rectangle {
+            x: min(root.gmenu-x, root.width - self.width - 4px);
+            y: min(root.gmenu-y, root.height - self.height - 4px);
+            width: 150px;
+            height: gmenu-col.preferred-height;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000050;
+            gmenu-col := VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+                // Rename group — unavailable for the default/ungrouped bucket.
+                if root.gmenu-group != "default" : Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: gi-edit.has-hover ? Theme.bg-hover : transparent;
+                    gi-edit := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.gmenu-open = false; root.edit-group(root.gmenu-group); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("Rename group"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                // Delete group — only when it has no sessions.
+                if root.gmenu-empty : Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: gi-del.has-hover ? #cc333320 : transparent;
+                    gi-del := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.gmenu-open = false; root.delete-group(root.gmenu-group); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("Delete group"); color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                // New group
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: gi-new.has-hover ? Theme.bg-hover : transparent;
+                    gi-new := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.gmenu-open = false; root.new-group(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E2CC}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: @tr("New group"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+            }
+        }
+    }
+}

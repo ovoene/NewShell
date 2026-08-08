@@ -1,0 +1,285 @@
+// Startup unlock window (config-file encryption feature).
+//
+// Shown at cold start *only* when the config is encrypted (a startup password
+// was set). It gates the whole app: the main window is never built until this
+// returns a correct password, or the user exits. It mirrors the immersive
+// wallpaper/theme look of AppWindow so it feels like part of the app rather
+// than an OS credential prompt — Rust drives the same Theme globals here as it
+// does for the other detached windows (see app.rs unlock flow).
+//
+// Deliberately has NO "reset config" button: forgetting the password means the
+// data is unrecoverable by design. Instead the window explains, in plain text,
+// that the only way to start over is to delete sessions.json.
+
+import { Theme } from "theme.slint";
+import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
+
+export component UnlockWindow inherits Window {
+    // Shared build label, fed from Rust (BUILD_LABEL) so the window title and the
+    // self-drawn titlebar always match the sidebar footer — single source of truth.
+    in property <string> build-label: "Build";
+    // Language flag, fed from Rust (mirrors the saved config language) so the
+    // lock screen matches the rest of the app's 中文/English setting.
+    in property <bool> lang-en: false;
+    title: "NewShell 新の世界 - " + root.build-label;
+    icon: @image-url("../assets/icon.png");
+
+    // Theme is a per-window global; Rust mirrors the saved (non-secret) display
+    // prefs from the plaintext envelope header so the lock screen matches the
+    // app before anything is decrypted.
+    in-out property <bool> dark-mode <=> Theme.dark;
+    // The lock screen is deliberately exempt from the global UI-scale setting
+    // (#100): it renders at a fixed 1.0 so the startup password prompt is a
+    // stable, self-contained dialog whose size never follows the app's zoom.
+    // Theme.ui-scale therefore keeps its 1.0 default here and Rust does NOT push
+    // the saved scale in (see apply_unlock_theme in app.rs).
+    in-out property <string> ui-font-family <=> Theme.ui-font-family;
+    in-out property <image> wallpaper-img <=> Theme.wallpaper;
+    in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
+    in-out property <color> wp-accent <=> Theme.wp-accent;
+    in-out property <color> wp-tint <=> Theme.wp-tint;
+    default-font-family: Theme.ui-font-family;
+
+    // Frameless + self-drawn titlebar on Windows/Linux (Rust sets this true),
+    // native frame elsewhere — mirrors AppWindow's approach (#119).
+    in property <bool> custom-titlebar;
+    no-frame: root.custom-titlebar;
+
+    // Bound to the password field; read by Rust on "启动".
+    in-out property <string> password;
+    // Set by Rust after a failed attempt so the user gets inline feedback
+    // instead of the window silently doing nothing.
+    in property <bool> error: false;
+    // Disable input while argon2id runs (100–200ms) so a double-Enter can't
+    // queue two verify attempts.
+    in property <bool> busy: false;
+    // Set locally when "启动" is pressed with an empty field, so we can nudge the
+    // user to type a password instead of silently doing nothing.
+    property <bool> empty-warn: false;
+    // Intro fade-in cover (#macos-intro). Started true by Rust so the lock
+    // screen's first frame is an opaque theme-coloured cover; once the native
+    // window has appeared, Rust clears it and the cover fades out. This hides the
+    // one-frame flash of the empty themed background that macOS shows before
+    // Slint paints (the native window is visible a frame before content, made
+    // worse by the transparent-titlebar / fullsize-content-view attributes that
+    // setup_macos_platform applies to every window). Without it the user sees a
+    // bare window-base rectangle — the same colour as the main UI — pop in for a
+    // frame. NOTE: this cover lives in the Slint content layer and CANNOT hide the
+    // macOS native traffic-light buttons (close/minimize/maximize) — those are
+    // drawn by the OS above the content layer, so app.rs hides them via
+    // set_titlebar_buttons_hidden until the card is painted.
+    in-out property <bool> intro-cover: false;
+
+    callback submit();            // verify `password`
+    callback quit();              // exit the app without unlocking
+    callback win-drag();          // start an OS window-move (frameless titlebar)
+
+    // Gate a submit on a non-empty password. On empty input we surface the
+    // "请输入密码" hint instead of silently doing nothing; otherwise we run the
+    // normal verify (unless argon2id is already in flight).
+    function try-submit() {
+        if (root.busy) {
+            return;
+        }
+        if (root.password == "") {
+            root.empty-warn = true;
+            return;
+        }
+        root.empty-warn = false;
+        root.submit();
+    }
+
+    min-width: 380px;
+    min-height: 300px;
+    preferred-width: 420px;
+    preferred-height: 360px;
+    background: Theme.window-base;
+
+    // Immersive wallpaper layer — behind everything, frosted by the card above.
+    if Theme.wallpaper-active : Image {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: Theme.wallpaper;
+        image-fit: cover;
+    }
+    // Opaque/frosted base so the card and text stay legible over any wallpaper.
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.bg-panel;
+    }
+
+    VerticalLayout {
+        spacing: 0;
+
+        // --- Custom titlebar (frameless platforms) -------------------------
+        if root.custom-titlebar : Rectangle {
+            height: 36px;
+            background: Theme.bg-elevated;
+            tb-drag := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.win-drag();
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 12px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../assets/icon.png");
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "NewShell 新の世界 - " + root.build-label;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }   // draggable spacer
+                // Close button = quit (no unlock).
+                Rectangle {
+                    width: 46px;
+                    background: close-ta.has-hover ? #e81123 : transparent;
+                    animate background { duration: 90ms; }
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.quit(); }
+                    }
+                    Text {
+                        text: "\u{E5CD}";
+                        font-family: "Material Icons";
+                        color: close-ta.has-hover ? white : Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // --- Unlock card ---------------------------------------------------
+        HorizontalLayout {
+            alignment: center;
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 340px;
+                        background: Theme.bg-panel-strong;
+                        border-radius: Theme.radius-lg;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 24px;
+                        drop-shadow-color: #00000080;
+
+                        VerticalLayout {
+                            padding: 24px;
+                            spacing: 14px;
+
+                            // App title (centered, no icon).
+                            Text {
+                                text: "新の世界";
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-xl;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: root.lang-en ? "Enter the startup password" : "请输入启动密码";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-md;
+                                horizontal-alignment: center;
+                            }
+
+                            pw := LabeledInput {
+                                label: "";
+                                placeholder: root.lang-en ? "Startup password" : "启动密码";
+                                password: true;
+                                auto-focus: true;
+                                value <=> root.password;
+                                accepted => { root.try-submit(); }
+                            }
+
+                            // Inline error / busy status, aligned to the left of the
+                            // password box. Reserve the row so the card doesn't jump
+                            // when the message appears. The empty-input hint clears
+                            // itself as soon as the user types (password != "").
+                            Text {
+                                text: root.busy
+                                    ? (root.lang-en ? "Verifying…" : "正在验证…")
+                                    : ((root.empty-warn && root.password == "")
+                                        ? (root.lang-en ? "Please enter the password" : "请输入密码")
+                                        : (root.error
+                                            ? (root.lang-en ? "Wrong password, please try again." : "密码错误，请重试。")
+                                            : " "));
+                                color: ((root.empty-warn && root.password == "") || root.error) ? Theme.danger : Theme.text-muted;
+                                font-size: Theme.fs-sm;
+                                horizontal-alignment: left;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                GhostButton {
+                                    text: root.lang-en ? "Exit" : "退出";
+                                    clicked => { root.quit(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                PrimaryButton {
+                                    text: root.lang-en ? "Unlock" : "启动";
+                                    disabled: root.busy;
+                                    clicked => { root.try-submit(); }
+                                }
+                            }
+
+                            // Forgot-password explanation (no reset button — the
+                            // data is unrecoverable by design).
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border-subtle;
+                            }
+                            Text {
+                                text: root.lang-en
+                                    ? "A forgotten password cannot recover the data. To start over, delete the config folder in the program directory."
+                                    : "忘记密码将无法找回数据。若要重新开始，请删除程序目录下的 config 文件夹。";
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-sm;
+                                font-weight: 700;
+                                wrap: word-wrap;
+                                horizontal-alignment: left;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Intro fade-in cover (topmost) ------------------------------------
+    // Opaque on the first frame (intro-cover = true), then Rust clears the flag
+    // shortly after show so opacity animates to 0 and the lock screen fades in
+    // instead of flashing its empty themed background on macOS. Uses window-base
+    // (the always-opaque backdrop) so nothing shows through mid-fade. A TouchArea
+    // swallows interactions while the cover (or its fade) is still visible.
+    intro := Rectangle {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: Theme.window-base;
+        opacity: root.intro-cover ? 1.0 : 0.0;
+        visible: self.opacity > 0.01;
+        animate opacity { duration: 200ms; easing: ease-out; }
+        TouchArea {
+            enabled: intro.opacity > 0.01;
+        }
+    }
+}

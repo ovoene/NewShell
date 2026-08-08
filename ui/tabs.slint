@@ -1,0 +1,315 @@
+import { Theme } from "theme.slint";
+import { IconButton } from "widgets.slint";
+
+export struct TabInfo {
+    id: string,
+    title: string,
+    title_len: int,
+    kind: string,   // "welcome" | "terminal"
+    connected: bool,
+}
+
+// --- SingleTab -------------------------------------------------------------
+component SingleTab inherits Rectangle {
+    in property <TabInfo> info;
+    in property <bool> active;
+    callback selected();
+    callback closed();
+    // Drag-to-reorder (v0.5): emitted while dragging when the tab should hop one
+    // slot left (-1) or right (+1). The model reorders and the tab follows.
+    callback reorder(int /* dir */);
+    // Right-click (v0.5): request a context menu at the given absolute position.
+    callback context-requested(length /* abs-x */, length /* abs-y */);
+    // Drag-to-split (v0.5): report the absolute cursor while dragging, and the
+    // drop point on release. The parent maps these to pane drop-zones.
+    callback drag-moved(length /* abs-x */, length /* abs-y */);
+    callback drag-dropped(length /* abs-x */, length /* abs-y */);
+
+    // Where inside the tab the drag began, and whether a drag (vs a click) is in
+    // progress. `dragging` suppresses the select-on-release.
+    property <length> grab-offset;
+    property <bool> pressing;
+    out property <bool> dragging;
+
+    height: 30px;
+    width: clamp(100px, 64px + info.title_len * 7px * Theme.ui-scale, 320px);
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-sm;
+    border-width: active ? 2px : 0px;
+    border-color: active ? Theme.accent : transparent;
+    background: dragging ? Theme.bg-active
+        : (active ? Theme.tab-active-bg
+        : (touch.has-hover ? Theme.bg-hover : transparent));
+    animate background { duration: 120ms; }
+
+    // Declared FIRST so the HorizontalLayout's children (close button) are at
+    // a higher z-order and receive their own click events.
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.grab-offset = self.mouse-x;
+                root.pressing = true;
+                root.dragging = false;
+            } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.context-requested(
+                    self.absolute-position.x + self.mouse-x,
+                    self.absolute-position.y + self.mouse-y);
+            } else if (e.kind == PointerEventKind.up) {
+                if (root.pressing && !root.dragging) {
+                    root.selected();
+                } else if (root.pressing && root.dragging) {
+                    root.drag-dropped(self.absolute-position.x + self.mouse-x,
+                                      self.absolute-position.y + self.mouse-y);
+                }
+                root.pressing = false;
+                root.dragging = false;
+            }
+        }
+        moved => {
+            if (root.pressing) {
+                // A drag begins once the cursor drifts horizontally OR leaves the
+                // tab vertically (so a straight-down drag to split also counts).
+                if (abs(self.mouse-x - root.grab-offset) > 5px
+                        || self.mouse-y < -6px || self.mouse-y > root.height + 6px) {
+                    root.dragging = true;
+                }
+                // Tell the parent where the cursor is, for drop-to-split zones.
+                root.drag-moved(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                // Reorder within the strip only while the cursor stays on the strip
+                // row; once it drops into a pane body we hand off to drag-to-split.
+                // One slot = the tab's own width + the 2px strip spacing; re-anchor
+                // grab-offset after each hop so the drift resets (no oscillation).
+                if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
+                    if (self.mouse-x - root.grab-offset > (root.width + 2px) / 2) {
+                        root.reorder(1);
+                        root.grab-offset = self.mouse-x - (root.width + 2px);
+                    } else if (self.mouse-x - root.grab-offset < -(root.width + 2px) / 2) {
+                        root.reorder(-1);
+                        root.grab-offset = self.mouse-x + (root.width + 2px);
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        width: parent.width - (info.kind != "welcome" ? 28px : 0px);
+        padding-left: 10px;
+        padding-right: 4px;
+        spacing: 8px;
+        alignment: start;
+
+        // Status indicator
+        Rectangle {
+            width: 8px; height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: info.kind == "welcome" ? Theme.text-muted
+                : (info.connected ? Theme.success : Theme.warning);
+        }
+
+        title-text := Text {
+            text: info.title;
+            color: active ? Theme.text-primary : Theme.text-secondary;
+            font-size: info.title_len > 24 ? 9px * Theme.ui-scale
+                : (info.title_len > 12 ? 10px * Theme.ui-scale : Theme.fs-sm);
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+    }
+
+    // Keep close pinned to the far right even when the title is very short.
+    if info.kind != "welcome" : IconButton {
+        glyph: "×";
+        size: 20px;
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        clicked => { root.closed(); }
+    }
+
+}
+
+// --- Tab context-menu item -------------------------------------------------
+component TabMenuItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 28px;
+    border-radius: Theme.radius-sm;
+    background: enabled && ta.has-hover ? Theme.bg-hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: label;
+            color: enabled ? Theme.text-primary : Theme.text-muted;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// --- TabBar ----------------------------------------------------------------
+export component TabBar inherits Rectangle {
+    in property <[TabInfo]> tabs;
+    in property <string> active-id;
+    in property <bool> show-new-tab: true;
+    in property <bool> can-merge-pane: false;
+    // Keep this much clear on the right so tabs don't slide under the app's
+    // top-right toolbar icons, which are positioned over the tab row (#122).
+    in property <length> reserve-right: 0px;
+    callback tab-selected(string);
+    callback tab-closed(string);
+    callback new-tab();
+    // Drag-to-reorder: move the tab at `from` one slot in `dir` (#v0.5).
+    callback tab-reorder(int /* from */, int /* dir */);
+    // Split this pane, peeling `tab-id` into a new pane on `dir` (#v0.5).
+    callback tab-split(string /* tab-id */, string /* dir */);
+    // Open another connection to the same session as `tab-id` (#v0.5).
+    callback tab-duplicate(string /* tab-id */);
+    callback merge-pane();
+    // Drag-to-split (#v0.5): cursor moved / dropped while dragging `tab-id`, in
+    // absolute (window) coordinates.
+    callback tab-drag-move(string /* tab-id */, length /* abs-x */, length /* abs-y */);
+    callback tab-drag-drop(string /* tab-id */, length /* abs-x */, length /* abs-y */);
+
+    // Right-click context-menu state.
+    property <length> menu-x;
+    property <length> menu-y;
+    property <string> menu-target;
+
+    height: 36px;
+    background: Theme.bg-panel-alt;
+
+    // True only when the tabs are wider than the available strip width (#122).
+    // Computed from the TabBar's own width (set by the parent), not flick.width,
+    // so showing the arrows (which shrink the flickable) can't feed back into this
+    // condition and form a binding loop. The 64px allows for the two arrows.
+    property <bool> tab-overflow:
+        strip.preferred-width > root.width - root.reserve-right - 64px;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+
+        // Horizontally-scrollable strip: when the tabs overflow the available
+        // width they stay reachable by the arrows or by dragging / trackpad (#122).
+        flick := Flickable {
+            horizontal-stretch: 1;
+            viewport-height: self.height;
+            viewport-width: max(self.width, strip.preferred-width);
+            strip := HorizontalLayout {
+                spacing: 2px;
+                alignment: start;
+                for tab[i] in tabs : SingleTab {
+                    info: tab;
+                    active: tab.id == root.active-id;
+                    selected => { root.tab-selected(tab.id); }
+                    closed => { root.tab-closed(tab.id); }
+                    reorder(dir) => { root.tab-reorder(i, dir); }
+                    context-requested(ax, ay) => {
+                        root.menu-target = tab.id;
+                        root.menu-x = ax - root.absolute-position.x;
+                        root.menu-y = ay - root.absolute-position.y;
+                        tab-menu.show();
+                    }
+                    drag-moved(ax, ay) => { root.tab-drag-move(tab.id, ax, ay); }
+                    drag-dropped(ax, ay) => { root.tab-drag-drop(tab.id, ax, ay); }
+                }
+                if root.show-new-tab : IconButton {
+                    glyph: "+";
+                    size: 28px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.new-tab(); }
+                }
+            }
+        }
+
+        // Reserved gap for the external top-right toolbar icons (#122).
+        Rectangle { width: root.reserve-right; }
+    }
+
+    // Scroll arrows are absolute overlays so toggling them can't
+    // change the layout that `tab-overflow` reads (avoids a binding loop). Shown
+    // only on overflow, masking the edge tab beneath them (#122).
+    if root.tab-overflow : Rectangle {
+        x: 3px;
+        y: (parent.height - self.height) / 2;
+        width: 26px; height: 26px;
+        background: Theme.bg-panel-alt;
+        IconButton {
+            glyph: "<"; size: 24px;
+            clicked => { flick.viewport-x = min(0px, flick.viewport-x + 120px); }
+        }
+    }
+    if root.tab-overflow : Rectangle {
+        x: root.width - root.reserve-right - 29px;
+        y: (parent.height - self.height) / 2;
+        width: 26px; height: 26px;
+        background: Theme.bg-panel-alt;
+        IconButton {
+            glyph: ">"; size: 24px;
+            clicked => {
+                flick.viewport-x = max(flick.width - flick.viewport-width, flick.viewport-x - 120px);
+            }
+        }
+    }
+
+    // Right-click context menu (v0.5): split this pane by peeling the clicked tab
+    // into a new pane. Splitting needs at least two tabs so the source pane survives.
+    tab-menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 140px;
+        height: 6 * 29px + 13px;
+        Rectangle {
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000060;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+                TabMenuItem {
+                    label: @tr("Duplicate connection");
+                    enabled: root.menu-target != "welcome";
+                    clicked => { root.tab-duplicate(root.menu-target); }
+                }
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+                TabMenuItem {
+                    label: @tr("Split right");
+                    enabled: root.tabs.length > 1;
+                    clicked => { root.tab-split(root.menu-target, "right"); }
+                }
+                TabMenuItem {
+                    label: @tr("Split down");
+                    enabled: root.tabs.length > 1;
+                    clicked => { root.tab-split(root.menu-target, "down"); }
+                }
+                TabMenuItem {
+                    label: @tr("Merge panes");
+                    enabled: root.can-merge-pane;
+                    clicked => { root.merge-pane(); }
+                }
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+                TabMenuItem {
+                    label: @tr("Close tab");
+                    enabled: root.menu-target != "welcome";
+                    clicked => { root.tab-closed(root.menu-target); }
+                }
+            }
+        }
+    }
+}

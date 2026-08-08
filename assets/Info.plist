@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The executable inside Contents/MacOS/ -->
+    <key>CFBundleExecutable</key>
+    <string>newshell</string>
+
+    <!-- Points to Contents/Resources/newshell.icns (no extension) -->
+    <key>CFBundleIconFile</key>
+    <string>newshell</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>dev.newshell.newshell</string>
+
+    <key>CFBundleName</key>
+    <string>NewShell</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>NewShell</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- __VERSION__ is substituted by sed in CI (e.g. "0.2.5") -->
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+
+    <!-- Opt-in to high-DPI Retina rendering -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- macOS 11 Big Sur minimum (matches Apple Silicon support) -->
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2024 newshell contributors. MIT OR Apache-2.0.</string>
+</dict>
+</plist>

@@ -1,0 +1,940 @@
+﻿import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { TabInfo } from "tabs.slint";
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
+
+export struct SftpEntry {
+    name: string,
+    full-path: string,
+    is-dir: bool,
+    size: string,
+    size-bytes: float,
+    modified: string,
+    modified-ts: float,
+    mode: int,        // POSIX permission bits, for the chmod dialog (#84)
+    selected: bool,   // multi-select checkbox state (#100)
+}
+
+export struct SftpTreeNode {
+    path: string,
+    name: string,
+    depth: int,
+    expanded: bool,
+    has-children: bool,
+}
+
+// One row of the file-list right-click context menu.
+component SftpMenuItem inherits Rectangle {
+    in property <string> label;
+    in property <brush> tint: Theme.text-primary;
+    in property <bool> enabled: true;   // disabled items grey out + ignore clicks
+    callback clicked();
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: (root.enabled && ta.has-hover) ? Theme.bg-hover : transparent;
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+    Text {
+        x: 10px;
+        text: root.label;
+        color: root.enabled ? root.tint : Theme.text-muted;
+        font-size: Theme.fs-sm;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SftpPanel — left directory tree + right file listing
+// ---------------------------------------------------------------------------
+
+export component SftpPanel inherits Rectangle {
+    // --- Properties --------------------------------------------------------
+    in property <string>  current-path: "/";
+    in property <[SftpEntry]>    entries;
+    in property <string>  status: @tr("SFTP not connected");
+    in property <bool>    loading: false;
+    in property <[SftpTreeNode]> tree-nodes: [];
+    in property <string> current-tab-id;
+    in property <[TabInfo]> transfer-targets: [];
+    in property <string> sort-key: "";
+    in property <int> sort-dir: 0; // 0 default / 1 asc / -1 desc
+    in property <bool> collapsed: false;   // when true only the toolbar shows
+    in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
+    in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
+    // Responsive columns: only when docked left/right (narrow, width-adjustable).
+    // Docked top/bottom the panel is wide and can only be resized vertically, so
+    // always show every column there (show-tree is true exactly in that case).
+    // When narrow, drop Size then Modified the moment keeping them would squeeze
+    // the Name column below `name-min` (names start eliding to "…"). Reserved
+    // widths: checkbox+padding+spacing 36px, Size col 76px, Modified 120px.
+    property <length> list-w: root.show-tree ? root.width - 161px : root.width;
+    property <length> name-min: 180px;     // narrower than this → start dropping columns
+    property <bool> show-size-col: root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min);
+    property <bool> show-modified-col: root.show-tree || (root.list-w - 36px - 120px > root.name-min);
+    property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
+    in property <int> selected-count;      // number of checked entries (#100)
+    // Panel-level right-click context menu (#84). One menu for the whole list:
+    // an empty `menu-target` means the click landed on whitespace, which greys
+    // out the item-specific actions (download/rename/…) but keeps new/refresh.
+    property <length> menu-x;
+    property <length> menu-y;
+    property <string> menu-target;          // "" = whitespace
+    property <string> menu-target-name;
+    property <bool>   menu-target-is-dir;
+    property <int>    menu-target-mode;     // permission bits for the chmod dialog
+    property <string> panel-mode: "files";
+    // The full toolbar needs roughly 480px once a useful path field is included.
+    // Below that, switch deliberately to a two-row compact layout instead of
+    // allowing fixed-size controls to squeeze the path and each other (#285).
+    property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
+
+    // --- Callbacks ---------------------------------------------------------
+    callback toggle-collapsed();    // minimise / restore the panel
+    callback navigate(string);
+    callback download(string);
+    callback upload-clicked(string /* remote dir */, bool /* folder */);
+    callback refresh(string);
+    callback tree-expand(string);   // toggle expand/collapse + navigate
+    callback delete(string);        // remove a remote file/dir
+    callback toggle-select(int);    // toggle a row's multi-select checkbox (#100)
+    callback download-selected();   // download all checked entries (#100)
+    callback delete-selected();     // delete all checked entries (#100)
+    callback copy-to-target(string /* path */, string /* target tab */);
+    callback copy-selected-to-target(string /* target tab */);
+    callback view(string);          // open read-only in the built-in viewer
+    callback edit(string);          // open writable in the built-in editor
+    callback open-external(string);     // open with the OS default app (#81)
+    callback edit-external(string);     // open externally + watch/re-upload (#81)
+    callback sort-request(string /* name|size|modified */);
+    callback clear-sort();
+    // Context-menu extensions (#69). The *-request callbacks open dialogs in
+    // the app shell; copy-path goes straight to the system clipboard.
+    callback rename-request(string /* path */, string /* current name */);
+    callback chmod-request(string /* path */, string /* name */, int /* mode */);
+    callback copy-path(string);
+    callback new-folder(string /* parent dir */);
+    callback new-file(string /* parent dir */);
+    // Drag-to-dock: empty areas of the panel are a grab handle; coordinates are
+    // reported in window space so the parent can compute the target edge (#dock).
+    callback dock-drag-move(length /* abs-x */, length /* abs-y */);
+    callback dock-drag-end();
+
+    // -----------------------------------------------------------------------
+    // Right-bottom custom region (directory panel): the user-set zone colour
+    // when enabled, otherwise the standard panel surface.
+    background: Theme.zone-right-bottom;
+    clip: true;
+
+    // Keep the editable path bar in sync when the directory changes elsewhere
+    // (tree click, file double-click, terminal cd) (#54).
+    changed current-path => {
+        path-input.text = root.current-path;
+        compact-path-input.text = root.current-path;
+        root.selected-row = -1;
+    }
+
+    // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
+    // buttons) sit in front and capture their own events (#dock).
+    dock-bg := TouchArea {
+        mouse-cursor: move;
+        moved => {
+            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+        }
+    }
+
+    // Hidden entirely when side-docked + collapsed: the horizontal toolbar would
+    // otherwise squish into an unusable vertical strip. `visible` (not `if`) so
+    // ids like path-input stay accessible to handlers. The parent floats a clean
+    // expand button over this (#dock).
+    VerticalLayout {
+        visible: !root.compact;
+        spacing: 0;
+
+        // --- Toolbar (full width) ------------------------------------------
+        Rectangle {
+            height: root.narrow-toolbar && root.panel-mode == "files" ? 62px : 34px;
+            background: Theme.bg-panel-alt;
+
+            VerticalLayout {
+                spacing: 6px;
+
+                HorizontalLayout {
+                height: 34px;
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 4px;
+
+                // Dedicated drag handle to re-dock the panel. The toolbar is full
+                // of controls, so dragging "empty space" is unreliable; this grip
+                // is always grabbable and reports window-space coords (#dock).
+                Rectangle {
+                    width: 16px;
+                    y: (parent.height - self.height) / 2;
+                    height: 22px;
+                    grip-ta := TouchArea {
+                        mouse-cursor: move;
+                        moved => {
+                            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                                self.absolute-position.y + self.mouse-y);
+                        }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                        }
+                    }
+                    Text {
+                        text: "\u{E945}";   // drag_indicator
+                        font-family: "Material Icons";
+                        color: grip-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
+
+                Rectangle {
+                    width: root.narrow-toolbar ? 28px : 48px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
+                    files-tab-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.panel-mode = "files"; }
+                    }
+                    Text {
+                        text: root.narrow-toolbar ? "\u{E2C7}" : @tr("Files");
+                        font-family: root.narrow-toolbar ? "Material Icons" : Theme.ui-font-family;
+                        color: root.panel-mode == "files" ? #ffffff : Theme.text-secondary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // In compact mode keep navigation tabs at the left and primary
+                // actions aligned at the right. The path gets the full second row.
+                if root.narrow-toolbar : Rectangle { horizontal-stretch: 1; }
+
+                // Editable path bar: type or paste a path and press Enter to
+                // jump there; copy / paste-jump buttons sit right after it (#54).
+                Rectangle {
+                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                    horizontal-stretch: 1;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-root;
+                    border-width: 1px;
+                    border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    path-input-ctx := ContextMenuArea {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        Menu {
+                            MenuItem { title: @tr("Cut"); activated => { path-input.cut(); } }
+                            MenuItem { title: @tr("Copy"); activated => { path-input.copy(); } }
+                            MenuItem { title: @tr("Paste"); activated => { path-input.paste(); } }
+                            MenuSeparator {}
+                            MenuItem { title: @tr("Select all"); activated => { path-input.select-all(); } }
+                        }
+                        path-input := TextInput {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.current-path;
+                            color: Theme.text-primary;
+                            // CJK-capable font so typed Chinese isn't tofu (#54).
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => { root.navigate(self.text); }
+                        }
+                    }
+                }
+
+                // Copy the current path to the clipboard.
+                Rectangle {
+                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: copy-ta.has-hover ? Theme.bg-hover : transparent;
+                    copy-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            path-input.select-all();
+                            path-input.copy();
+                            path-input.clear-selection();
+                        }
+                    }
+                    Text { text: "\u{E14D}"; font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                // Paste a path from the clipboard and jump straight to it.
+                Rectangle {
+                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: pj-ta.has-hover ? Theme.bg-hover : transparent;
+                    pj-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            path-input.select-all();
+                            path-input.paste();
+                            root.navigate(path-input.text);
+                        }
+                    }
+                    Text { text: "\u{E14F}"; font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                up-btn := Rectangle {
+                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: up-ta.has-hover ? Theme.bg-hover : transparent;
+                    up-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.navigate(".."); }
+                    }
+                    Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                // Upload: a small menu offers file vs folder (#85). The remote
+                // SFTP upload handles both — only the local picker differs.
+                ul-btn := Rectangle {
+                    visible: root.panel-mode == "files";
+                    width: root.narrow-toolbar ? 24px : 52px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    ul-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { ul-menu.show(); }
+                    }
+                    Text { text: root.narrow-toolbar ? "↑" : @tr("Upload"); color: #ffffff; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                    ul-menu := PopupWindow {
+                        x: 0; y: parent.height + 2px;
+                        width: 124px;
+                        height: 2 * 27px + 8px;
+                        Rectangle {
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Upload file");
+                                    clicked => { root.upload-clicked(root.current-path, false); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Upload folder");
+                                    clicked => { root.upload-clicked(root.current-path, true); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Secondary path actions move into an overflow menu in compact
+                // mode so they never compete with the path field for width.
+                compact-more-btn := Rectangle {
+                    visible: root.narrow-toolbar && root.panel-mode == "files";
+                    width: 24px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
+                    compact-more-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { compact-more-menu.show(); }
+                    }
+                    Text {
+                        text: "\u{E5D4}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-md;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    compact-more-menu := PopupWindow {
+                        x: parent.width - self.width;
+                        y: parent.height + 2px;
+                        width: 142px;
+                        height: 4 * 27px + 8px;
+                        Rectangle {
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Up one level");
+                                    clicked => { root.navigate(".."); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy path");
+                                    clicked => {
+                                        compact-path-input.select-all();
+                                        compact-path-input.copy();
+                                        compact-path-input.clear-selection();
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Paste and go");
+                                    clicked => {
+                                        compact-path-input.select-all();
+                                        compact-path-input.paste();
+                                        root.navigate(compact-path-input.text);
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Refresh");
+                                    clicked => { root.refresh(root.current-path); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Batch actions on checked entries — only when something's checked (#100).
+                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Text {
+                    text: "✓" + root.selected-count;
+                    color: Theme.accent;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                }
+                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: dls-ta.has-hover ? Theme.bg-hover : transparent;
+                    dls-ta := TouchArea { mouse-cursor: pointer; clicked => { root.download-selected(); } }
+                    Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: dels-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                    dels-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-selected(); } }
+                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: Theme.danger;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                Rectangle {
+                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: ref-ta.has-hover ? Theme.bg-hover : transparent;
+                    ref-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.refresh(root.current-path); }
+                    }
+                    Text { text: "\u{E5D5}"; font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                // Minimise / restore the SFTP panel (#41).
+                Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: min-ta.has-hover ? Theme.bg-hover : transparent;
+                    min-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle-collapsed(); }
+                    }
+                    // expand_less (▲, restore) when collapsed, expand_more (▼) otherwise.
+                    Text { text: root.collapsed ? "\u{E5CE}" : "\u{E5CF}"; font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-md;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                }
+
+                // Preserve path navigation in the side-docked compact layout by
+                // moving it to a real second layout row. The layout spacing keeps
+                // a stable gutter regardless of first-row alignment/padding.
+                HorizontalLayout {
+                    visible: root.narrow-toolbar && root.panel-mode == "files";
+                    height: self.visible ? 22px : 0px;
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-root;
+                        border-width: 1px;
+                        border-color: compact-path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        compact-path-input-ctx := ContextMenuArea {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            Menu {
+                                MenuItem { title: @tr("Cut"); activated => { compact-path-input.cut(); } }
+                                MenuItem { title: @tr("Copy"); activated => { compact-path-input.copy(); } }
+                                MenuItem { title: @tr("Paste"); activated => { compact-path-input.paste(); } }
+                                MenuSeparator {}
+                                MenuItem { title: @tr("Select all"); activated => { compact-path-input.select-all(); } }
+                            }
+                            compact-path-input := TextInput {
+                                width: parent.width;
+                                height: parent.height;
+                                text: root.current-path;
+                                color: Theme.text-primary;
+                                font-family: Theme.ui-font-family;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                                single-line: true;
+                                accepted => { root.navigate(self.text); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Main area: tree (left) + file list (right) --------------------
+        if root.panel-mode == "files" : HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0;
+
+            // ── Left: directory tree (hidden when the panel is narrow) ──────
+            if root.show-tree : VerticalLayout {
+                width: 160px;
+                spacing: 0;
+
+                // Tree header
+                Rectangle {
+                    height: 20px;
+                    background: Theme.bg-root;
+                    Text {
+                        x: 8px;
+                        text: @tr("Directory tree");
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-xs;
+                        vertical-alignment: center;
+                        height: parent.height;
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                // Tree list with scrollbar
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    tree-list := VerticalLayout {
+                        spacing: 0;
+
+                        for node[i] in root.tree-nodes : Rectangle {
+                            height: 22px;
+                            background: node-ta.has-hover
+                                ? Theme.bg-hover
+                                : (node.path == root.current-path
+                                    ? #4a90e230
+                                    : (mod(i, 2) == 0 ? transparent : #ffffff08));
+
+                            node-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.tree-expand(node.path); }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 0;
+                                padding-top: 1px;
+
+                                // Depth indent spacer
+                                Rectangle { width: node.depth * 12px; }
+
+                                // Expand/collapse arrow
+                                Text {
+                                    width: 14px;
+                                    text: node.has-children
+                                        ? (node.expanded ? "▼" : "▶")
+                                        : " ";
+                                    color: Theme.text-muted;
+                                    font-size: 9px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // Folder name
+                                Text {
+                                    text: node.depth == 0 ? "/" : node.name;
+                                    color: node.path == root.current-path
+                                        ? Theme.accent
+                                        : Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Vertical separator (only when the tree is shown)
+            if root.show-tree : Rectangle { width: 1px; background: Theme.border-subtle; }
+
+            // ── Right: file listing ─────────────────────────────────────────
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 0;
+
+                // Column headers
+                Rectangle {
+                    height: 20px;
+                    background: Theme.bg-root;
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 8px;
+                        // Spacer matching the rows' checkbox so the header columns
+                        // line up with the values below them (#dock).
+                        Rectangle { width: 16px; }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            header-name-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("name"); }
+                            }
+                            Text {
+                                text: @tr("Name") + (root.sort-key == "name" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
+                                color: root.sort-key == "name" ? Theme.accent : Theme.text-muted;
+                                font-size: Theme.fs-xs;
+                                width: parent.width;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.show-size-col : Rectangle {
+                            width: 72px;
+                            header-size-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("size"); }
+                            }
+                            Text {
+                                text: @tr("Size") + (root.sort-key == "size" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
+                                color: root.sort-key == "size" ? Theme.accent : Theme.text-muted;
+                                font-size: Theme.fs-xs;
+                                width: parent.width;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.show-modified-col : Rectangle {
+                            width: 116px;
+                            header-modified-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("modified"); }
+                            }
+                            Text {
+                                text: @tr("Modified") + (root.sort-key == "modified" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
+                                color: root.sort-key == "modified" ? Theme.accent : Theme.text-muted;
+                                font-size: Theme.fs-xs;
+                                width: parent.width;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                // File list. The area fills the panel height so right-click works
+                // on the whitespace below the rows too (#84); the single menu
+                // below greys out item actions when nothing was hit.
+                file-area := Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: self.visible-width;
+                        viewport-height: max(self.visible-height, file-list.preferred-height);
+
+                        file-list := VerticalLayout {
+                            spacing: 0;
+
+                            if root.loading : Rectangle {
+                                height: 40px;
+                                Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
+
+                            if !root.loading && root.entries.length == 0 : Rectangle {
+                                height: 40px;
+                                Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
+
+                            for entry[i] in root.entries : row := Rectangle {
+                                height: 24px;
+                                background: entry.selected
+                                    ? #4a90e235
+                                    : (i == root.selected-row
+                                        ? #4a90e240
+                                        : (row-ta.has-hover
+                                            ? #4a90e225
+                                            : (mod(i, 2) == 0 ? transparent : #ffffff08)));
+
+                                row-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.selected-row = i; }
+                                    double-clicked => {
+                                        if (entry.is-dir) {
+                                            root.navigate(entry.full-path);
+                                        } else {
+                                            root.download(entry.full-path);
+                                        }
+                                    }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.down
+                                                && ev.button == PointerEventButton.right) {
+                                            root.selected-row = i;
+                                            root.menu-target = entry.full-path;
+                                            root.menu-target-name = entry.name;
+                                            root.menu-target-is-dir = entry.is-dir;
+                                            root.menu-target-mode = entry.mode;
+                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                            file-menu.show();
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                    // Multi-select checkbox (#100). Its own TouchArea
+                                    // sits above the row, so toggling doesn't trigger
+                                    // navigate/select.
+                                    Rectangle {
+                                        width: 16px;
+                                        y: (parent.height - self.height) / 2;
+                                        height: 16px;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: entry.selected ? Theme.accent : Theme.border-strong;
+                                        background: entry.selected ? Theme.accent : transparent;
+                                        cb-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.toggle-select(i); }
+                                        }
+                                        if entry.selected : Text {
+                                            text: "\u{E5CA}"; // check
+                                            font-family: "Material Icons";
+                                            color: #ffffff;
+                                            font-size: 13px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            width: parent.width; height: parent.height;
+                                        }
+                                    }
+                                    Text {
+                                        text: entry.is-dir ? "📁 " + entry.name : "📄 " + entry.name;
+                                        color: entry.is-dir ? Theme.accent : Theme.text-primary;
+                                        font-size: Theme.fs-sm;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.show-size-col : Text {
+                                        text: entry.is-dir ? "" : entry.size;
+                                        color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                        width: 72px; horizontal-alignment: right; vertical-alignment: center;
+                                    }
+                                    if root.show-modified-col : Text {
+                                        text: entry.modified;
+                                        color: Theme.text-muted; font-size: Theme.fs-xs;
+                                        width: 116px; horizontal-alignment: right; vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Whitespace below the rows: right-click here opens the
+                            // menu with no target (item actions greyed out) (#84).
+                            ws := Rectangle {
+                                vertical-stretch: 1;
+                                min-height: 24px;
+                                ws-ta := TouchArea {
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.down
+                                                && ev.button == PointerEventButton.right) {
+                                            root.selected-row = -1;
+                                            root.menu-target = "";
+                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                            file-menu.show();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // One context menu for the whole list (#84). Item actions are
+                    // enabled only when an item was right-clicked (menu-target set);
+                    // new/refresh are always available.
+                    copy-target-menu := PopupWindow {
+                        x: root.menu-x + 148px;
+                        y: root.menu-y;
+                        width: 148px;
+                        height: max(1, root.transfer-targets.length) * 27px + 8px;
+                        Rectangle {
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                for target in root.transfer-targets : SftpMenuItem {
+                                    label: target.title;
+                                    enabled: target.kind == "terminal" && target.connected && target.id != root.current-tab-id;
+                                    clicked => {
+                                        if (root.selected-count >= 2) {
+                                            root.copy-selected-to-target(target.id);
+                                        } else if (root.menu-target != "") {
+                                            root.copy-to-target(root.menu-target, target.id);
+                                        } else {
+                                            root.copy-selected-to-target(target.id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    file-menu := PopupWindow {
+                        x: root.menu-x;
+                        y: root.menu-y;
+                        width: 148px;
+                        height: 14 * 27px + 8px;
+                        Rectangle {
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Download");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.download(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("View");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.view(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Edit");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.edit(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Open externally");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.open-external(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Edit externally");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.edit-external(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Rename");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.rename-request(root.menu-target, root.menu-target-name); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Permissions");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.chmod-request(root.menu-target, root.menu-target-name, root.menu-target-mode); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy path");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.copy-path(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy to session...");
+                                    enabled: (root.menu-target != "" || root.selected-count > 0) && root.transfer-targets.length > 1;
+                                    clicked => { copy-target-menu.show(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Delete");
+                                    tint: #d86c6c;
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.delete(root.menu-target); }
+                                }
+                                Rectangle { height: 1px; background: Theme.border-subtle; }
+                                SftpMenuItem {
+                                    label: @tr("New folder");
+                                    clicked => { root.new-folder(root.current-path); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("New file");
+                                    clicked => { root.new-file(root.current-path); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Refresh");
+                                    clicked => { root.refresh(root.current-path); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Clear sort");
+                                    enabled: root.sort-dir != 0;
+                                    clicked => { root.clear-sort(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        // --- Status bar (full width) --------------------------------------
+        Rectangle {
+            height: 18px;
+            background: Theme.bg-panel-alt;
+            Text {
+                x: 8px;
+                text: root.status;
+                color: Theme.text-muted;
+                font-size: Theme.fs-xs;
+                vertical-alignment: center;
+                height: parent.height;
+                overflow: elide;
+                width: parent.width - 16px;
+            }
+        }
+    }
+}

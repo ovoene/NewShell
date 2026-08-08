@@ -1,0 +1,24 @@
+# ---- Rust ----
+# 编译产物（体积大、可重新生成，绝不入库）
+/target/
+**/*.rs.bk
+
+# ---- Python ----
+# assets/make_icon.py 运行后产生的字节码缓存（非源码）
+__pycache__/
+*.py[cod]
+
+# ---- 打包中间物（本地跑 scripts/release.ps1 或 CI 会生成，非源码）----
+/dist/
+/NewShell.app/
+/newshell.iconset/
+/newshell.icns
+
+# ---- 操作系统 / 编辑器垃圾 ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+.idea/
+.vscode/

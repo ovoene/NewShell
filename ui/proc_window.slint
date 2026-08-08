@@ -1,0 +1,464 @@
+// Detachable process-monitor window (#23 follow-up).
+//
+// Originally an overlay rectangle painted inside AppWindow, the process monitor
+// is now a *real* top-level OS window so it can be dragged anywhere — outside
+// the main window, or onto a second monitor. It mirrors the frameless custom
+// titlebar look of AppWindow (drag to move, ✕ to close) and reads its rows from
+// a model shared with the main window, so the table stays live.
+
+import { Theme } from "theme.slint";
+import { LabeledInput, GhostButton } from "widgets.slint";
+
+// One row in the process table. Lives here (not app.slint) so both the main
+// window and this window can import it without a circular dependency.
+export struct ProcRow {
+    tab-id: string,
+    pid: string,
+    user: string,
+    cpu: string,       // "12.3" (percent, one decimal)
+    mem: string,       // "4.5"
+    command: string,   // truncated args
+    cpu-frac: float,   // 0.0..1.0, drives the row load bar
+    own-process: bool, // may terminate without root authentication
+}
+
+component ProcMenuItem inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    background: menu-touch.has-hover ? Theme.bg-hover : transparent;
+    menu-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.label;
+        color: Theme.danger;
+        font-size: Theme.fs-sm;
+        vertical-alignment: center;
+        x: 10px;
+    }
+}
+
+component ProcDangerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 30px;
+    min-width: 90px;
+    border-radius: Theme.radius-sm;
+    background: !root.enabled ? Theme.bg-hover
+        : danger-touch.pressed ? #c44a4a
+        : danger-touch.has-hover ? #ec6a6a
+        : Theme.danger;
+    danger-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text;
+        color: root.enabled ? white : Theme.text-muted;
+        font-size: Theme.fs-md;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ProcWindow inherits Window {
+    title: "NewShell 新の世界 — " + @tr("Processes");
+    icon: @image-url("../assets/icon.png");
+    // Theme is a *per-window* global, so a detached window keeps the compile-time
+    // defaults (dark) unless Rust mirrors the main window's theme/scale/font here.
+    // These two-way bindings give Rust one knob per setting (see sync in app.rs).
+    in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <float> ui-scale <=> Theme.ui-scale;
+    in-out property <string> ui-font-family <=> Theme.ui-font-family;
+    // Immersive wallpaper — mirrored from the main window so this detached window
+    // gets the same frosted-glass backdrop (synced in app.rs::sync_proc_theme).
+    in-out property <image> wallpaper-img <=> Theme.wallpaper;
+    in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
+    in-out property <color> wp-accent <=> Theme.wp-accent;
+    in-out property <color> wp-tint <=> Theme.wp-tint;
+    // CJK-capable default font so "进程"/host never render as tofu (the embedded
+    // mono has no CJK glyphs); mirrors AppWindow.
+    default-font-family: Theme.ui-font-family;
+    // Frameless + self-drawn titlebar on Windows/Linux (Rust sets this true),
+    // native frame elsewhere — mirrors AppWindow's approach (#119).
+    in property <bool> custom-titlebar;
+    no-frame: root.custom-titlebar;
+    in property <[ProcRow]> proc-list;       // top remote processes by CPU
+    in property <string> host;               // "user@host" shown in the titlebar
+
+    in-out property <string> action-status;
+    in-out property <bool> action-busy;
+    in-out property <bool> action-error;
+    property <string> selected-pid;
+    property <string> selected-tab-id;
+    property <string> selected-user;
+    property <string> selected-command;
+    property <bool> selected-own-process;
+    property <bool> terminate-dialog-open;
+    property <bool> terminate-dialog-pending;
+    property <string> root-password;
+    property <length> menu-x;
+    property <length> menu-y;
+
+    callback close();
+    callback win-drag();          // start an OS window-move (frameless titlebar)
+    callback win-resize-se();     // start an OS resize from the bottom-right grip
+    callback copy-pid(string);
+    callback terminate-process(string /* tab id */, string /* pid */, string /* root password, empty for own process */);
+
+    // Create the confirmation dialog only after the context-menu click event
+    // has fully completed, preventing pointer-up fall-through on any backend.
+    terminate-dialog-timer := Timer {
+        interval: 0ms;
+        running: root.terminate-dialog-pending;
+        triggered => {
+            root.terminate-dialog-pending = false;
+            root.terminate-dialog-open = true;
+        }
+    }
+
+    min-width: 420px;
+    min-height: 280px;
+    preferred-width: 640px;
+    preferred-height: 520px;
+    // Opaque base; the wallpaper Image covers it and the panels frost over the
+    // image (mirrors AppWindow) so this window matches the immersive look.
+    background: Theme.window-base;
+
+    // Immersive wallpaper layer — behind everything, frosted by the panel above.
+    if Theme.wallpaper-active : Image {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: Theme.wallpaper;
+        image-fit: cover;
+    }
+    // Content backdrop: opaque bg-panel without a wallpaper (the original look),
+    // frosted-translucent over the wallpaper when active so the table stays
+    // readable while the image shows through.
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.bg-panel;
+    }
+
+    VerticalLayout {
+        spacing: 0;
+
+        // --- Custom titlebar (frameless platforms) -------------------------
+        if root.custom-titlebar : Rectangle {
+            height: 36px;
+            background: Theme.bg-elevated;
+            tb-drag := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.win-drag();
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 12px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../assets/icon.png");
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: @tr("Processes") + (root.host != "" ? "  ·  " + root.host : "");
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }   // draggable spacer
+                // Close button.
+                Rectangle {
+                    width: 46px;
+                    background: close-ta.has-hover ? #e81123 : transparent;
+                    animate background { duration: 90ms; }
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close(); }
+                    }
+                    Text {
+                        text: "\u{E5CD}";
+                        font-family: "Material Icons";
+                        color: close-ta.has-hover ? white : Theme.text-secondary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // --- Table ----------------------------------------------------------
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            // Column header.
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                Text { text: "PID"; width: 56px; color: Theme.text-muted; font-size: Theme.fs-xs; }
+                Text { text: @tr("User"); width: 84px; color: Theme.text-muted; font-size: Theme.fs-xs; }
+                Text { text: "CPU%"; width: 52px; color: Theme.text-muted; font-size: Theme.fs-xs;
+                       horizontal-alignment: right; }
+                Text { text: "MEM%"; width: 52px; color: Theme.text-muted; font-size: Theme.fs-xs;
+                       horizontal-alignment: right; }
+                Text { text: @tr("Command"); horizontal-stretch: 1; color: Theme.text-muted; font-size: Theme.fs-xs; }
+            }
+
+            if root.action-status != "" : Text {
+                text: root.action-status;
+                color: root.action-busy ? Theme.text-muted
+                    : root.action-error ? Theme.danger : Theme.success;
+                font-size: Theme.fs-xs;
+                overflow: elide;
+            }
+
+            Flickable {
+                vertical-stretch: 1;
+                viewport-width: self.width;
+                viewport-height: max(self.height, proc-col.preferred-height);
+                proc-col := VerticalLayout {
+                    alignment: start;
+                    spacing: 1px;
+
+                    if root.proc-list.length == 0 : Text {
+                        text: @tr("No processes");
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-xs;
+                    }
+
+                    for p in root.proc-list : Rectangle {
+                        height: 20px;
+                        border-radius: 2px;
+                        clip: true;
+
+                        row-touch := TouchArea {
+                            pointer-event(e) => {
+                                // Open on button release. Opening on `down` lets the
+                                // matching `up` hit the newly-created popup/dialog
+                                // and can accidentally skip confirmation.
+                                if (e.kind == PointerEventKind.up && e.button == PointerEventButton.right) {
+                                    root.selected-pid = p.pid;
+                                    root.selected-tab-id = p.tab-id;
+                                    root.selected-user = p.user;
+                                    root.selected-command = p.command;
+                                    root.selected-own-process = p.own-process;
+                                    root.menu-x = self.absolute-position.x - root.absolute-position.x + self.mouse-x;
+                                    root.menu-y = self.absolute-position.y - root.absolute-position.y + self.mouse-y;
+                                    proc-menu.show();
+                                }
+                            }
+                        }
+
+                        // CPU load bar behind the row.
+                        Rectangle {
+                            x: 0; y: 0;
+                            height: parent.height;
+                            width: parent.width * clamp(p.cpu-frac, 0.0, 1.0);
+                            background: p.cpu-frac > 0.5 ? Theme.warning.with-alpha(0.28)
+                                      : Theme.accent.with-alpha(0.20);
+                        }
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            Rectangle {
+                                width: 56px;
+                                pid-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.copy-pid(p.pid);
+                                        root.action-status = @tr("PID copied") + ": " + p.pid;
+                                        root.action-error = false;
+                                    }
+                                }
+                                Text { text: p.pid; color: pid-touch.has-hover ? Theme.accent : Theme.text-secondary;
+                                       font-size: Theme.fs-xs; vertical-alignment: center; }
+                            }
+                            Text { text: p.user; width: 84px; color: Theme.text-secondary;
+                                   font-size: Theme.fs-xs; vertical-alignment: center; overflow: elide; }
+                            Text { text: p.cpu; width: 52px; color: Theme.text-primary;
+                                   font-size: Theme.fs-xs; vertical-alignment: center;
+                                   horizontal-alignment: right; }
+                            Text { text: p.mem; width: 52px; color: Theme.text-secondary;
+                                   font-size: Theme.fs-xs; vertical-alignment: center;
+                                   horizontal-alignment: right; }
+                            Text { text: p.command; horizontal-stretch: 1; color: Theme.text-muted;
+                                   font-size: Theme.fs-xs; vertical-alignment: center; overflow: elide; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    proc-menu := PopupWindow {
+        x: min(root.menu-x, root.width - self.width - 8px);
+        y: min(root.menu-y, root.height - self.height - 8px);
+        width: 150px;
+        height: 42px;
+        Rectangle {
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000070;
+            VerticalLayout {
+                padding: 6px;
+                ProcMenuItem {
+                    label: @tr("Terminate process");
+                    clicked => {
+                        proc-menu.close();
+                        root.root-password = "";
+                        root.terminate-dialog-pending = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.terminate-dialog-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #000000aa;
+        TouchArea {
+            clicked => {
+                if (!root.action-busy) {
+                    root.root-password = "";
+                    root.terminate-dialog-open = false;
+                }
+            }
+        }
+        Rectangle {
+            width: 420px;
+            height: terminate-card.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            TouchArea { }
+
+            terminate-card := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: @tr("Terminate process");
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-xl;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.selected-own-process
+                        ? @tr("Terminate this process? It may lose unsaved data.")
+                        : @tr("This process belongs to root or another user. Enter your administrator (sudo) password to continue.");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-md;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "PID " + root.selected-pid + "  ·  " + root.selected-user;
+                    color: Theme.text-primary;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-sm;
+                }
+                Text {
+                    text: root.selected-command;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    overflow: elide;
+                }
+                if !root.selected-own-process : LabeledInput {
+                    label: @tr("Administrator password");
+                    placeholder: @tr("Enter sudo password");
+                    password: true;
+                    auto-focus: true;
+                    value <=> root.root-password;
+                    accepted => {
+                        if (root.root-password != "" && !root.action-busy) {
+                            root.terminate-process(root.selected-tab-id, root.selected-pid, root.root-password);
+                            root.root-password = "";
+                            root.action-busy = true;
+                            root.action-error = false;
+                            root.action-status = @tr("Terminating process...");
+                            root.terminate-dialog-open = false;
+                        }
+                    }
+                    canceled => {
+                        root.root-password = "";
+                        root.terminate-dialog-open = false;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    GhostButton {
+                        text: @tr("Cancel");
+                        clicked => {
+                            root.root-password = "";
+                            root.terminate-dialog-open = false;
+                        }
+                    }
+                    ProcDangerButton {
+                        text: @tr("Terminate");
+                        enabled: !root.action-busy && (root.selected-own-process || root.root-password != "");
+                        clicked => {
+                            root.terminate-process(root.selected-tab-id, root.selected-pid,
+                                root.selected-own-process ? "" : root.root-password);
+                            root.root-password = "";
+                            root.action-busy = true;
+                            root.action-error = false;
+                            root.action-status = @tr("Terminating process...");
+                            root.terminate-dialog-open = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Bottom-right resize grip (frameless platforms) --------------------
+    if root.custom-titlebar : Rectangle {
+        width: 16px;
+        height: 16px;
+        x: root.width - self.width;
+        y: root.height - self.height;
+        TouchArea {
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.win-resize-se();
+                }
+            }
+        }
+        // Classic dotted resize grip (a diagonal of 2px dots, bottom-right).
+        Rectangle { x: parent.width - 5px;  y: parent.height - 5px;  width: 2px; height: 2px;
+                    background: Theme.text-muted; }
+        Rectangle { x: parent.width - 9px;  y: parent.height - 5px;  width: 2px; height: 2px;
+                    background: Theme.text-muted; }
+        Rectangle { x: parent.width - 5px;  y: parent.height - 9px;  width: 2px; height: 2px;
+                    background: Theme.text-muted; }
+    }
+}

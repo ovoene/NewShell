@@ -1,0 +1,14 @@
+# 让 Windows (MSVC) 目标静态链接 C 运行库 (CRT)。
+#
+# 为什么需要：MSVC 默认是【动态】链接 VC++ 运行库，编译出的 exe 会依赖
+# VCRUNTIME140.dll / VCRUNTIME140_1.dll / api-ms-win-crt-*.dll 这些系统里
+# 默认没有的 DLL（要装 "Visual C++ 可再发行组件" 才有）。缺了就加载失败，
+# 而本程序是 windows_subsystem="windows" 的 GUI 程序，失败时【静默】无窗口，
+# 表现为"双击 NewShell.exe 没反应"。
+#
+# 加上 +crt-static 后 CRT 被【静态】打进 exe，产物真正自包含，任何纯净的
+# Windows 10/11 直接双击即可运行，无需预装任何运行库。
+#
+# 仅作用于 Windows MSVC，不影响 macOS / Linux 的构建。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
