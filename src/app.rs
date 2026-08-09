@@ -17,7 +17,7 @@ pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// The single source of truth for the build label. Shown verbatim in the sidebar
 /// footer AND in the unlock window's title bar / window title, so both always
 /// agree — edit just this one line each release.
-pub(crate) const BUILD_LABEL: &str = "Build 2026.08.08";
+pub(crate) const BUILD_LABEL: &str = "Build 2026.08.09";
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -736,6 +736,12 @@ where
 {
 }
 
+/// macOS unlock-window placement is handled entirely at window *creation* time by
+/// AppKit itself (`NSWindow.center()`, invoked by winit when `attrs.position` is `None`
+/// — see `setup_macos_platform`). No creation-time origin is staged here, which is what
+/// keeps it portable across Macs — the centre is read from the live screen geometry by
+/// AppKit rather than baked from a pre-show offset that differs per machine.
+
 /// macOS-only: install a custom winit backend that makes the native title bar
 /// transparent and lets the window content render *under* it (fullSizeContentView).
 /// The title bar then picks up the app's dark theme / wallpaper (`Theme.window-base`)
@@ -774,8 +780,38 @@ fn setup_macos_platform(renderer_mode: &str) {
         },
         "initializing macOS renderer"
     );
-    builder = builder.with_window_attributes_hook(|attrs| {
+    builder = builder.with_window_attributes_hook(|mut attrs| {
+        // Centre every window on its screen using AppKit's own `NSWindow.center()`,
+        // which winit invokes at *creation time* when no explicit position is requested
+        // (we clear `position` so that path runs). This is the canonical macOS way to
+        // have a window appear centred from its very first frame — it happens before
+        // `orderFront`, so there is no off-centre birth frame to flash, and it is
+        // identical on every Mac because AppKit reads the live screen geometry itself.
+        //
+        // CRITICAL: every window is born HIDDEN (`with_visible(false)`). macOS paints an
+        // unpainted placeholder frame the instant a window is ordered front at a
+        // non-centred spot, so a window must never become visible until it is already at
+        // its final (centred) position. `win.run()` / `show()` reveal the window
+        // (set_visible(true)) afterwards.
+        //
+        // Sizing for the unlock window: winit centres the *creation-time* frame, so that
+        // frame must already be the real 420x360 (matching unlock_window.slint), NOT the
+        // 800x600 winit default — otherwise winit centres 800x600, then Slint shrinks the
+        // window to 420x360 with a fixed top-left → it drifts left/up (the historical 偏左).
+        // `unlock_config` sets `UNLOCK_SIZING` just before building the window; here we
+        // honour it by forcing `inner_size` so the centred creation frame is the correct
+        // size. MUST stay in sync with `preferred-width` / `preferred-height`.
+        attrs.position = None;
+        if UNLOCK_SIZING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            attrs = attrs.with_inner_size(
+                i_slint_backend_winit::winit::dpi::LogicalSize::new(420.0, 360.0),
+            );
+            eprintln!(
+                "[unlock-hook] unlock window: forced inner_size 420x360 at creation (winit centres the real frame)"
+            );
+        }
         attrs
+            .with_visible(false)
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
             .with_title_hidden(true)
@@ -2927,6 +2963,14 @@ fn apply_unlock_theme(win: &UnlockWindow, locked: &LockedStore) {
     }
 }
 
+// Signalled by `unlock_config` just before the unlock window is built so the macOS
+// window-attributes hook can force the real 420x360 size *at creation time* (winit then
+// centres the correct frame instead of the 800x600 default). Cleared by the hook.
+// macOS-only: both its writer (`unlock_config`, cfg-gated) and its reader
+// (`setup_macos_platform`, cfg-gated) compile out on other platforms.
+#[cfg(target_os = "macos")]
+static UNLOCK_SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Gate the app behind the startup-password screen. Builds the [`UnlockWindow`],
 /// themes it from the plaintext header, and runs its own event loop until the
 /// user either enters a correct password or exits.
@@ -2937,10 +2981,23 @@ fn apply_unlock_theme(win: &UnlockWindow, locked: &LockedStore) {
 ///   unlocking; `run()` exits cleanly.
 /// * `Err(_)` — the envelope is corrupt (not a wrong-password case).
 fn unlock_config(locked: LockedStore) -> Result<Option<ConfigStore>> {
+    // Signal the macOS window-attributes hook to force this window's real 420x360 size at
+    // creation (so winit centres the correct frame). See `UNLOCK_SIZING`.
+    #[cfg(target_os = "macos")]
+    {
+        UNLOCK_SIZING.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let win = UnlockWindow::new().context("failed to build unlock window")?;
-    // Frameless + self-drawn titlebar on Windows/Linux; native frame on macOS —
-    // mirrors AppWindow / the other detached windows (#119).
-    win.set_custom_titlebar(cfg!(not(target_os = "macos")));
+    // Frameless + self-drawn titlebar on *every* platform, including macOS. A
+    // native-framed unlock window on macOS shows the OS traffic-light buttons
+    // (close/min/max) a frame before Slint paints the card — setup_macos_platform
+    // applies transparent-titlebar / fullsize-content-view to *every* window, so
+    // the native frame is visible (with its buttons) before the password UI is
+    // up, causing the one-frame flash. Going frameless removes the native frame —
+    // and therefore the traffic lights — entirely, so there is nothing native to
+    // flash. The self-drawn titlebar in unlock_window.slint (close button + drag
+    // strip) replaces the native ones, mirroring Windows/Linux (#119).
+    win.set_custom_titlebar(true);
     // Feed the shared build label into the unlock window so its window title and
     // self-drawn titlebar match the sidebar footer exactly (single source of
     // truth is BUILD_LABEL).
@@ -2952,67 +3009,46 @@ fn unlock_config(locked: LockedStore) -> Result<Option<ConfigStore>> {
     win.set_lang_en(crate::i18n::is_en());
     apply_unlock_theme(&win, &locked);
 
-    // The lock screen flashes for a frame on macOS before Slint paints the card:
-    // setup_macos_platform applies transparent-titlebar / fullsize-content-view
-    // attributes to every window, so the OS shows the native window (its empty
-    // window-base background *and* the native traffic-light buttons) a frame
-    // before the password UI appears. The empty background is hidden by the
-    // Slint intro-cover below, but the traffic lights are drawn by macOS *above*
-    // the Slint content layer and cannot be covered by a Slint Rectangle — so we
-    // hide them until the card is up, then reveal them alongside the cover fade.
-    // End state is still the expected native window with its three buttons.
+    // First-frame placement: the self-drawn intro-cover (an opaque Theme.window-base
+    // rectangle in unlock_window.slint) masks the gap between the native window becoming
+    // visible and the first Slint paint, then fades out. On Windows/Linux it also hides the
+    // content during the brief post-show slide to centre; on macOS the window is centred
+    // while still hidden, so there is no slide to hide.
     win.set_intro_cover(true);
-    #[cfg(target_os = "macos")]
+
+    // Placement. The window must NEVER become visible at a non-centred spot — macOS paints
+    // an unpainted placeholder frame the instant a window is ordered front off-centre, which
+    // is exactly the "left blur box" / "偏左" symptom. So the centring strategy differs per OS:
+    //
+    // macOS: the hook (`setup_macos_platform`) creates the window HIDDEN and winit centres the
+    // *creation-time* frame via `NSWindow.center()`. But that frame is winit's 800×600 default
+    // until Slint resizes it, so we additionally centre it WHILE STILL HIDDEN (just before
+    // `win.run()`) using its REAL, forced inner size — then `win.run()` reveals it already
+    // centred. No flash, no slide. See the `#[cfg(target_os = "macos")]` block before `win.run()`.
+    //
+    // Windows/Linux: born at the WM's default spot, then slid to the centre a few ms after show
+    // via `center_unlock_window`; the intro-cover masks the content during that slide.
+
+    // Windows/Linux: born at the WM's default spot, then slid to the centre a few ms after
+    // show via `center_unlock_window`; the intro-cover hides the content during the slide.
+    // (macOS does NOT use this path — it is centred while still hidden, see below.)
+    #[cfg(not(target_os = "macos"))]
     {
         let weak = win.as_weak();
-        // Hide the native traffic lights as early as possible (next event-loop
-        // tick, once the window actually exists) so they don't flash on the bare
-        // window. Doing this from a timer (not synchronously) is required because
-        // the winit window isn't materialised until `win.run()` starts.
-        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        slint::Timer::single_shot(std::time::Duration::from_millis(40), move || {
             if let Some(w) = weak.upgrade() {
-                w.window().with_winit_window(|ww| {
-                    use i_slint_backend_winit::winit::platform::macos::WindowExtMacOS as _;
-                    ww.set_titlebar_buttons_hidden(true);
-                });
-            }
-        });
-    }
-    {
-        let weak = win.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(90), move || {
-            if let Some(w) = weak.upgrade() {
-                w.set_intro_cover(false);
-                #[cfg(target_os = "macos")]
-                {
-                    w.window().with_winit_window(|ww| {
-                        use i_slint_backend_winit::winit::platform::macos::WindowExtMacOS as _;
-                        ww.set_titlebar_buttons_hidden(false);
-                    });
-                }
+                center_unlock_window(&w);
             }
         });
     }
 
-    // Center the unlock window on the monitor once it's shown (size is only
-    // known after the first frame, so defer via a single-shot timer). On macOS
-    // the native-framed window's final outer size can still be settling at
-    // 30ms, which would leave it off-center, so re-center once more at a longer
-    // delay to correct it after the size is final.
+    // Clear the intro-cover after a short fixed delay: it outlasts the re-centre above
+    // so the card is already at rest by the time it becomes visible.
     {
         let weak = win.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(30), move || {
+        slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
             if let Some(w) = weak.upgrade() {
-                center_unlock_window(&w);
-            }
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let weak = win.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(160), move || {
-            if let Some(w) = weak.upgrade() {
-                center_unlock_window(&w);
+                w.set_intro_cover(false);
             }
         });
     }
@@ -3088,6 +3124,14 @@ fn unlock_config(locked: LockedStore) -> Result<Option<ConfigStore>> {
             }
         });
     }
+
+    // NOTE: on macOS the unlock window is centred by forcing its real 420x360 size at
+    // *window-creation time* inside `setup_macos_platform`'s window-attributes hook
+    // (gated by the `UNLOCK_SIZING` flag). winit centres the creation-time frame, so
+    // forcing the size there makes it centre the correct 420x360 frame instead of the
+    // 800x600 default — which would otherwise be shrunk by Slint → left-of-centre drift
+    // (偏左). No pre-show window manipulation is needed here. MUST stay in sync with
+    // `preferred-width` / `preferred-height` in unlock_window.slint.
 
     win.run().context("unlock event loop exited with error")?;
     // Release the unlock window (and its wallpaper texture) before the main
@@ -3203,16 +3247,26 @@ fn center_unlock_window(win: &UnlockWindow) {
         .set_position(slint::PhysicalPosition::new(x, y));
 }
 
-#[cfg(not(windows))]
+/// Center the unlock window on its current monitor (Linux & macOS, winit backend).
+///
+/// Runs *after* show() on the first event-loop tick, using the window's REAL
+/// `outer_size()` (the size Slint settled on after layout) and the live monitor
+/// geometry. That is what makes it correct on macOS: `NSWindow.center()` at creation
+/// time only centres the *creation-time* frame, which is wrong when Slint resizes the
+/// window afterwards (the origin stays fixed and the window drifts — usually left/up,
+/// the "偏左" symptom). Re-centring here with the final size fixes it. The intro-cover
+/// masks the brief slide so there is no flash. (Windows uses its own work-area variant
+/// above; it relies on the same post-show timing.)
+#[cfg(target_os = "linux")]
 fn center_unlock_window(win: &UnlockWindow) {
     use i_slint_backend_winit::winit::dpi::PhysicalPosition;
 
     win.window().with_winit_window(|ww| {
         // Center on the monitor the window currently sits on; fall back to the
-        // primary monitor because macOS can briefly report a None current
-        // monitor right after the window is shown. Using current_monitor first
-        // also keeps the lock screen on whichever display the OS placed it,
-        // rather than always jumping to the primary one.
+        // primary monitor because a freshly-shown window can briefly report a
+        // None current monitor. Using current_monitor first also keeps the lock
+        // screen on whichever display the OS placed it, rather than always
+        // jumping to the primary one.
         let monitor = ww.current_monitor().or_else(|| ww.primary_monitor())?;
         let origin = monitor.position();
         let monitor_size = monitor.size();

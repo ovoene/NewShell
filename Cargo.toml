@@ -1,6 +1,6 @@
 [package]
 name = "newshell"
-version = "8.8.8"
+version = "8.8.9"
 edition = "2021"
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"
@@ -105,6 +105,22 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # import library at link time when using the MSVC toolchain (#224).
 [target.'cfg(target_os = "macos")'.dependencies]
 slint = { version = "1.8", features = ["renderer-skia"] }
+# Direct binding to the Objective-C runtime for macOS-only window placement. Pinned to 0.5.2 to
+# match the version `i-slint-backend-winit` (winit 0.30) already pulls in transitively, so cargo
+# reuses the locked copy instead of compiling a second major version. Used solely to send the
+# `center` selector to the unlock window's underlying `NSWindow` via `objc2::msg_send!` — Apple's
+# own Dock-aware centre-in-visible-area (see the `#[cfg(target_os = "macos")]` block in
+# `unlock_config`). We deliberately do NOT use the typed `objc2-app-kit` API: its `NSWindow` /
+# `NSWindowMethods` are feature-gated, and a second direct copy would risk a feature/version
+# mismatch with the one winit already compiles. `msg_send!` needs no extra feature and works on
+# the raw pointer winit's `WindowExtMacOS::ns_window()` hands back.
+objc2 = "0.5.2"
+# `NSSize` (re-exported as `objc2_foundation::NSSize`, an `objc2::Encode` type) for the
+# `setContentSize:` call that locks the real window size SYNCHRONOUSLY via AppKit. winit's
+# `request_inner_size` is *deferred* for a not-yet-shown window, so it does NOT apply before
+# `center()` runs — which was the root cause of the persistent off-centre (偏左) drift. Pinned to
+# 0.2.2 to match winit's transitive copy; the `NSGeometry` feature enables the type.
+objc2-foundation = { version = "0.2.2", features = ["NSGeometry"] }
 
 # Compile the SOFTWARE renderer in on Windows (feature is additive over the base
 # slint dependency). CRITICAL: without this, the config's "software" renderer_mode

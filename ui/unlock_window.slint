@@ -40,8 +40,12 @@ export component UnlockWindow inherits Window {
     in-out property <color> wp-tint <=> Theme.wp-tint;
     default-font-family: Theme.ui-font-family;
 
-    // Frameless + self-drawn titlebar on Windows/Linux (Rust sets this true),
-    // native frame elsewhere — mirrors AppWindow's approach (#119).
+    // Frameless + self-drawn titlebar on every platform (Rust always sets this
+    // true). Going frameless on macOS avoids the one-frame flash of the native
+    // traffic-light buttons that a native-framed window would show before Slint
+    // paints; the self-drawn close button + drag strip below replace the native
+    // ones. Mirrors the AppWindow titlebar approach minus the macOS native frame
+    // (#119).
     in property <bool> custom-titlebar;
     no-frame: root.custom-titlebar;
 
@@ -64,10 +68,11 @@ export component UnlockWindow inherits Window {
     // worse by the transparent-titlebar / fullsize-content-view attributes that
     // setup_macos_platform applies to every window). Without it the user sees a
     // bare window-base rectangle — the same colour as the main UI — pop in for a
-    // frame. NOTE: this cover lives in the Slint content layer and CANNOT hide the
-    // macOS native traffic-light buttons (close/minimize/maximize) — those are
-    // drawn by the OS above the content layer, so app.rs hides them via
-    // set_titlebar_buttons_hidden until the card is painted.
+    // frame. NOTE: this cover lives in the Slint content layer and hides the one-frame
+    // flash of the bare window *content* on every platform. The macOS native
+    // traffic-light buttons (close/minimize/maximize) are avoided entirely by
+    // making this window frameless (custom-titlebar: true -> no-frame), so there
+    // are no OS-drawn buttons above the content layer to flash in the first place.
     in-out property <bool> intro-cover: false;
 
     callback submit();            // verify `password`
