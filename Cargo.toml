@@ -1,6 +1,6 @@
 [package]
 name = "newshell"
-version = "8.8.9"
+version = "8.8.10"
 edition = "2021"
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"

@@ -22,3 +22,6 @@ Desktop.ini
 *~
 .idea/
 .vscode/
+
+# AI 助手本地记忆（不入库）
+.workbuddy-ai/

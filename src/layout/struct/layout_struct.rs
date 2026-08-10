@@ -68,13 +68,7 @@ pub struct SplitterRect {
     pub axis_len: f32,
 }
 
-pub(crate) struct TerminalWheelHit {
-    pub(crate) tab_id: String,
-    pub(crate) is_alt: bool,
-    pub(crate) col: i32,
-    pub(crate) row: i32,
-}
-
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 pub(crate) struct LogicalRect {
     pub(crate) x: f32,

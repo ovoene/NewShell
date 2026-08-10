@@ -17,7 +17,7 @@ pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// The single source of truth for the build label. Shown verbatim in the sidebar
 /// footer AND in the unlock window's title bar / window title, so both always
 /// agree — edit just this one line each release.
-pub(crate) const BUILD_LABEL: &str = "Build 2026.08.09";
+pub(crate) const BUILD_LABEL: &str = "Build 2026.08.10";
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -71,10 +71,13 @@ fn highlight_color_index(color: &str) -> u8 {
 /// Max UI renders per second for a tab under sustained output (#209).
 const RENDER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// macOS mouse-wheel tuning for the non-terminal panel Flickables (#macos-scroll).
+/// macOS mouse-wheel speed tuning (#macos-scroll). The winit wheel arm re-emits
+/// every wheel event as an amplified `PointerScrolled` and lets Slint route it by
+/// position, so this distance applies uniformly to whatever is under the cursor —
+/// terminal scrollback, side panels, the settings ScrollView, dialogs.
 /// winit reports an external mouse wheel as LineDelta (one notch = ±1 line); this
-/// is the logical-pixel distance we scroll the panels per notch. Matches the feel
-/// of Windows, where Slint turns one LineDelta notch into a comparable distance.
+/// is the logical-pixel distance we scroll per notch. Matches the feel of Windows,
+/// where Slint turns one LineDelta notch into a comparable distance.
 ///
 /// NOTE: the whole `MouseWheel` arm is selected with a *runtime* `cfg!(target_os =
 /// "macos")` guard (see `run`), so its body is compiled on every target even though
@@ -83,8 +86,8 @@ const RENDER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// scope". They are referenced (in dead-but-compiled code) on other platforms, so
 /// there is no unused-constant warning either.
 const MACOS_WHEEL_LINE_PX: f32 = 60.0;
-/// Gain applied to PixelDelta wheel input (trackpad / precise wheels) before it
-/// reaches the panel Flickables. Slint's built-in macOS handling scrolls too
+/// Gain applied to PixelDelta wheel input (trackpad / precise wheels) before it is
+/// re-emitted as a `PointerScrolled`. Slint's built-in macOS handling scrolls too
 /// little per event, so the UI felt sluggish and lagged the wheel; this brings
 /// the speed in line with Windows.
 const MACOS_WHEEL_GAIN: f32 = 2.5;
@@ -215,7 +218,8 @@ use crate::config::{
     SessionKind,
 };
 use crate::i18n::t;
-use crate::layout::{LogicalRect, TerminalWheelHit};
+#[cfg(windows)]
+use crate::layout::LogicalRect;
 use crate::resource::{
     LocalHardwareInfo, LocalSnap, NetHist, TabStatus, TabStatuses,
 };
@@ -2415,7 +2419,6 @@ pub fn run() -> Result<()> {
         use i_slint_backend_winit::EventResult;
         let weak = window.as_weak();
         let sh = sftp_handles.clone();
-        let wheel_bufs = bufs.clone();
         let close_handles = handles.clone();
         let ev_store = store.clone();
         let ev_activity = activity.clone();
@@ -2423,7 +2426,6 @@ pub fn run() -> Result<()> {
         let ev_window_size_tracking_ready = window_size_tracking_ready.clone();
         let ev_pending_window_size_restore = pending_window_size_restore.clone();
         let mut last_cursor_logical: Option<(f32, f32)> = None;
-        let mut macos_wheel_accum = 0.0_f32;
         // Track the inputs that make up WinActivity; recompute on each change.
         let mut focused = true;
         let mut minimized = false;
@@ -2514,6 +2516,25 @@ pub fn run() -> Result<()> {
                     }
                 }
                 WEvent::MouseWheel { delta, .. } if cfg!(target_os = "macos") => {
+                    // macOS wheel handling is a pure *speed amplifier* — nothing
+                    // more. Slint's built-in macOS wheel scrolls too little per
+                    // event, so the whole UI (terminal scrollback, side panels,
+                    // the settings ScrollView, dialogs) felt sluggish and lagged
+                    // the wheel (#macos-scroll). We re-emit the wheel as a larger
+                    // PointerScrolled and let Slint's own hit-testing deliver it to
+                    // whatever is actually under the cursor.
+                    //
+                    // We deliberately do NOT decide *what* the wheel hits here.
+                    // Slint already routes a PointerScrolled to the top-most
+                    // element at `position` — the terminal's own `scroll-event`
+                    // handler, a panel Flickable, or a modal overlay's ScrollView
+                    // (Settings, editor, dialogs) whose backdrop swallows the
+                    // event. Re-implementing that routing in Rust (a geometry
+                    // hit-test that only knew about terminal panes) is what made
+                    // overlays un-scrollable whenever a terminal existed beneath
+                    // them — the wheel was captured for the hidden terminal and
+                    // never reached the overlay. Letting Slint route fixes that and
+                    // keeps macOS behaviour identical to Windows/Linux.
                     let Some((x, y)) = last_cursor_logical else {
                         return EventResult::Propagate;
                     };
@@ -2522,39 +2543,9 @@ pub fn run() -> Result<()> {
                     };
                     let scale = win.window().scale_factor().max(0.01) as f64;
 
-                    // --- Terminal scrollback (unchanged feel) ----------------
-                    // The terminal owns its own history and steps whole lines, so
-                    // convert the wheel to lines exactly as before and accumulate
-                    // fractional motion until a whole line is reached.
-                    let term_lines = match delta {
-                        MouseScrollDelta::LineDelta(_, dy) => dy * 3.0,
-                        MouseScrollDelta::PixelDelta(p) => {
-                            let p = p.to_logical::<f64>(scale);
-                            p.y as f32 / 18.0
-                        }
-                    };
-                    if term_lines.abs() >= f32::EPSILON {
-                        macos_wheel_accum += term_lines;
-                        let whole = macos_wheel_accum.trunc() as i32;
-                        if whole != 0 {
-                            macos_wheel_accum -= whole as f32;
-                            if handle_macos_terminal_wheel(&win, &wheel_bufs, x, y, whole) {
-                                return EventResult::PreventDefault;
-                            }
-                        } else if terminal_wheel_hit(&win, &wheel_bufs, x, y).is_some() {
-                            // Over the terminal but < 1 line so far — swallow so an
-                            // underlying Flickable doesn't twitch on sub-line input.
-                            return EventResult::PreventDefault;
-                        }
-                    }
-
-                    // --- Other panels: amplified smooth scroll ---------------
-                    // Slint's built-in macOS wheel handling scrolls too little per
-                    // event, so the panel Flickables felt sluggish and lagged the
-                    // wheel (#macos-scroll). Drive them ourselves with an amplified
-                    // PointerScrolled so the speed matches Windows. LineDelta gets a
-                    // fixed logical step per notch; PixelDelta (trackpad / precise
-                    // wheels) is amplified by a gain factor.
+                    // LineDelta (external mouse) gets a fixed logical step per
+                    // notch; PixelDelta (trackpad / precise wheels) is amplified by
+                    // a gain factor. This matches the Windows scroll distance.
                     let (px_x, px_y) = match delta {
                         MouseScrollDelta::LineDelta(dx, dy) => {
                             (dx * MACOS_WHEEL_LINE_PX, dy * MACOS_WHEEL_LINE_PX)
@@ -3296,80 +3287,7 @@ fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
     String::new()
 }
 
-fn handle_macos_terminal_wheel(
-    win: &AppWindow,
-    bufs: &TermBuffers,
-    x: f32,
-    y: f32,
-    lines: i32,
-) -> bool {
-    let Some(hit) = terminal_wheel_hit(win, bufs, x, y) else {
-        return false;
-    };
-    if hit.is_alt {
-        win.invoke_terminal_wheel(hit.tab_id.into(), lines.signum(), hit.col, hit.row);
-    } else {
-        win.invoke_terminal_scroll(hit.tab_id.into(), lines);
-    }
-    true
-}
-
-fn terminal_wheel_hit(
-    win: &AppWindow,
-    bufs: &TermBuffers,
-    x: f32,
-    y: f32,
-) -> Option<TerminalWheelHit> {
-    let (active, term, term_state) = active_terminal_panel_rects(win)?;
-    let mut term_x = term.x;
-    let mut term_y = term.y;
-    let mut term_w = term.w;
-    let mut term_h = term.h;
-
-    // TerminalView starts with a 24px status line, then the SFTP dock-region.
-    term_y += 24.0;
-    term_h = (term_h - 24.0).max(0.0);
-
-    let sftp_dock = win.get_sftp_dock().to_string();
-    let sftp_take = if term_state.sftp_collapsed {
-        36.0
-    } else if sftp_dock == "left" || sftp_dock == "right" {
-        term_state.sftp_panel_width + 4.0
-    } else {
-        term_state.sftp_panel_height + 4.0
-    };
-    shrink_edge(&mut term_x, &mut term_y, &mut term_w, &mut term_h, &sftp_dock, sftp_take);
-
-    // Leave the command bar to TextInput/history handling; wheel fallback is for
-    // terminal output only.
-    term_h = (term_h - 34.0).max(0.0);
-    if !contains_logical(
-        LogicalRect {
-            x: term_x,
-            y: term_y,
-            w: term_w,
-            h: term_h,
-        },
-        x,
-        y,
-    ) {
-        return None;
-    }
-
-    let h = term_buf(bufs, &active)?;
-    let guard = h.lock().ok()?;
-    let screen = guard.parser.screen();
-    let (rows, cols) = screen.size();
-    let cell_w = (term_w / cols.max(1) as f32).max(1.0);
-    let cell_h = (term_h / rows.max(1) as f32).max(1.0);
-    Some(TerminalWheelHit {
-        tab_id: active,
-        is_alt: screen.alternate_screen(),
-        col: ((x - term_x) / cell_w).floor() as i32,
-        row: ((y - term_y) / cell_h).floor() as i32,
-    })
-}
-
+#[cfg(windows)]
 fn shrink_edge(x: &mut f32, y: &mut f32, w: &mut f32, h: &mut f32, dock: &str, amount: f32) {
     let amount = amount.max(0.0);
     match dock {
@@ -3387,10 +3305,12 @@ fn shrink_edge(x: &mut f32, y: &mut f32, w: &mut f32, h: &mut f32, dock: &str, a
     }
 }
 
+#[cfg(windows)]
 fn contains_logical(rect: LogicalRect, x: f32, y: f32) -> bool {
     x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h
 }
 
+#[cfg(windows)]
 fn app_content_area(win: &AppWindow) -> LogicalRect {
     let size = win.window().size();
     let scale = win.window().scale_factor().max(0.01) as f32;
@@ -3473,6 +3393,7 @@ fn app_content_area(win: &AppWindow) -> LogicalRect {
     area
 }
 
+#[cfg(windows)]
 fn active_terminal_panel_rects(win: &AppWindow) -> Option<(String, LogicalRect, TerminalState)> {
     let active = win.get_active_tab_id().to_string();
     if active.is_empty() || active == "welcome" {
