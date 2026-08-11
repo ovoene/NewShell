@@ -22,7 +22,7 @@ component StatRow inherits HorizontalLayout {
 
     Text {
         text: label;
-        color: Theme.text-secondary;
+        color: Theme.zone-left-text-secondary;
         font-size: Theme.fs-sm;
         width: 52px;          // fits English "Memory" as well as 中文 "内存"
         vertical-alignment: center;
@@ -49,7 +49,7 @@ component StatRow inherits HorizontalLayout {
         Text {
             x: 6px;
             text: Math.round(percent * 100) + "%";
-            color: Theme.text-primary;
+            color: Theme.zone-left-text-primary;
             font-size: Theme.fs-xs;
             vertical-alignment: center;
             height: parent.height;
@@ -59,7 +59,7 @@ component StatRow inherits HorizontalLayout {
     // Used/total figure, right-aligned; reserve width so it never gets clipped.
     Text {
         text: detail;
-        color: Theme.text-muted;
+        color: Theme.zone-left-text-muted;
         font-size: Theme.fs-xs;
         horizontal-stretch: 1;
         min-width: 64px;
@@ -109,7 +109,7 @@ component StatusBlock inherits Rectangle {
                           : Theme.text-muted;
             }
             Text { text: @tr("Status") + " - " + (root.conn-state == 1 ? @tr("Connected") : @tr("Not connected"));
-                   color: Theme.text-primary;
+                   color: Theme.zone-left-text-primary;
                    font-size: Theme.fs-md; font-weight: 600;
                    vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
@@ -121,7 +121,7 @@ component StatusBlock inherits Rectangle {
                 background: cl-ta.has-hover ? Theme.bg-hover : transparent;
                 cl-ta := TouchArea { mouse-cursor: pointer; clicked => { root.collapse(); } }
                 Text { text: root.collapse-icon; font-family: "Material Icons";
-                       font-size: 14px; color: Theme.text-secondary;
+                       font-size: 14px; color: Theme.zone-left-text-secondary;
                        horizontal-alignment: center; vertical-alignment: center; }
             }
         }
@@ -141,13 +141,13 @@ component StatusBlock inherits Rectangle {
                 Text {
                     text: "\u{E894}";              // computer / host glyph
                     font-family: "Material Icons";
-                    color: Theme.text-secondary;
+                    color: Theme.zone-left-text-secondary;
                     font-size: Theme.fs-sm;
                     vertical-alignment: center;
                 }
                 Text {
                     text: root.conn-host;
-                    color: Theme.text-primary;
+                    color: Theme.zone-left-text-primary;
                     font-size: Theme.fs-sm;
                     font-weight: 600;
                     vertical-alignment: center;
@@ -167,7 +167,7 @@ component StatusBlock inherits Rectangle {
                     Text {
                         text: "\u{E14D}";          // content_copy glyph
                         font-family: "Material Icons";
-                        color: Theme.text-secondary;
+                        color: Theme.zone-left-text-secondary;
                         font-size: 13px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -199,13 +199,13 @@ component StatusBlock inherits Rectangle {
                 Text {
                     text: "\u{E923}";              // "history"/timer glyph
                     font-family: "Material Icons";
-                    color: Theme.text-secondary;
+                    color: Theme.zone-left-text-secondary;
                     font-size: Theme.fs-sm;
                     vertical-alignment: center;
                 }
                 Text {
                     text: root.conn-uptime;
-                    color: Theme.text-primary;
+                    color: Theme.zone-left-text-primary;
                     font-size: Theme.fs-sm;
                     font-weight: 600;
                     vertical-alignment: center;
@@ -252,7 +252,7 @@ component StatsBlock inherits VerticalLayout {
                 x: 4px;
                 width: parent.width - 8px;
                 text: root.resource-title;
-                color: Theme.text-secondary;
+                color: Theme.zone-left-text-secondary;
                 font-size: Theme.fs-sm;
                 vertical-alignment: center;
                 overflow: elide;
@@ -266,7 +266,7 @@ component StatsBlock inherits VerticalLayout {
             Text {
                 text: "\u{E88E}";
                 font-family: "Material Icons";
-                color: Theme.text-secondary;
+                color: Theme.zone-left-text-secondary;
                 font-size: Theme.fs-sm;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -292,8 +292,8 @@ component DiskBlock inherits Rectangle {
         spacing: 3px;
         HorizontalLayout {
             padding-left: 6px; padding-right: 6px;
-            Text { text: @tr("Path"); color: Theme.text-secondary; font-size: Theme.fs-xs; font-weight: 600; horizontal-stretch: 1; }
-            Text { text: @tr("Free/Total"); color: Theme.text-secondary; font-size: Theme.fs-xs; font-weight: 600; }
+            Text { text: @tr("Path"); color: Theme.zone-left-text-secondary; font-size: Theme.fs-xs; font-weight: 600; horizontal-stretch: 1; }
+            Text { text: @tr("Free/Total"); color: Theme.zone-left-text-secondary; font-size: Theme.fs-xs; font-weight: 600; }
         }
         flick := Flickable {
             vertical-stretch: 1;
@@ -322,9 +322,9 @@ component DiskBlock inherits Rectangle {
                     }
                     HorizontalLayout {
                         padding-left: 6px; padding-right: 6px; spacing: 4px;
-                        Text { text: d.path; color: Theme.text-secondary; font-size: Theme.fs-xs;
+                        Text { text: d.path; color: Theme.zone-left-text-secondary; font-size: Theme.fs-xs;
                                vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                        Text { text: d.detail; color: Theme.text-muted; font-size: Theme.fs-xs;
+                        Text { text: d.detail; color: Theme.zone-left-text-muted; font-size: Theme.fs-xs;
                                vertical-alignment: center; horizontal-alignment: right; }
                     }
                 }
@@ -337,7 +337,7 @@ component DiskBlock inherits Rectangle {
         border-width: 1px; border-color: Theme.border-subtle;
         drop-shadow-blur: 8px; drop-shadow-offset-y: 2px; drop-shadow-color: #00000040;
         Text { x: 8px; y: (parent.height - self.height) / 2; width: parent.width - 16px;
-               text: tip-path; color: Theme.text-primary; font-size: Theme.fs-xs; overflow: elide; }
+               text: tip-path; color: Theme.zone-left-text-primary; font-size: Theme.fs-xs; overflow: elide; }
     }
 }
 
@@ -451,7 +451,7 @@ export component Sidebar inherits Rectangle {
             DiskBlock { vertical-stretch: 1; disks: root.disks; }
             Text {
                 text: "NewShell 新の世界 " + root.app-version;
-                color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: center;
+                color: Theme.zone-left-text-muted; font-size: Theme.fs-xs; horizontal-alignment: center;
             }
         }
     }

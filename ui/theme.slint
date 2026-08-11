@@ -170,4 +170,35 @@ export global Theme {
     out property <brush> zone-left:         zone-left-enabled ? zone-left-bg.with-alpha(zone-left-alpha) : bg-panel;
     out property <brush> zone-right-top:    zone-right-top-enabled ? zone-right-top-bg.with-alpha(zone-right-top-alpha) : term-bg;
     out property <brush> zone-right-bottom: zone-right-bottom-enabled ? zone-right-bottom-bg.with-alpha(zone-right-bottom-alpha) : bg-panel;
+
+    // --- Custom region *text* colours (区域内字体颜色) ----------------------
+    // A single primary colour per zone; the secondary/muted tiers are derived
+    // here by lowering opacity, so one pick keeps the theme's 浓→淡 hierarchy
+    // (rather than flattening every label to one flat colour). Rust sets the
+    // `*-text-enabled` flag to (zone-enabled AND a valid custom text colour), so
+    // an empty pick — or a disabled zone — transparently falls back to the theme
+    // text tiers. For the terminal zone these only affect the terminal's own
+    // default text + command bar; script-driven ANSI colours are untouched.
+    in-out property <bool>  zone-left-text-enabled: false;
+    in-out property <color> zone-left-text-color: #e6e8ee;
+    in-out property <bool>  zone-right-top-text-enabled: false;
+    in-out property <color> zone-right-top-text-color: #d4d4d4;
+    in-out property <bool>  zone-right-bottom-text-enabled: false;
+    in-out property <color> zone-right-bottom-text-color: #e6e8ee;
+
+    // Opacity tiers used to derive secondary/muted from the picked primary.
+    property <float> zone-text-secondary-alpha: 0.72;
+    property <float> zone-text-muted-alpha: 0.5;
+
+    out property <brush> zone-left-text-primary:   zone-left-text-enabled ? zone-left-text-color : text-primary;
+    out property <brush> zone-left-text-secondary: zone-left-text-enabled ? zone-left-text-color.with-alpha(zone-text-secondary-alpha) : text-secondary;
+    out property <brush> zone-left-text-muted:     zone-left-text-enabled ? zone-left-text-color.with-alpha(zone-text-muted-alpha) : text-muted;
+
+    out property <brush> zone-right-top-text-primary:   zone-right-top-text-enabled ? zone-right-top-text-color : text-primary;
+    out property <brush> zone-right-top-text-secondary: zone-right-top-text-enabled ? zone-right-top-text-color.with-alpha(zone-text-secondary-alpha) : text-secondary;
+    out property <brush> zone-right-top-text-muted:     zone-right-top-text-enabled ? zone-right-top-text-color.with-alpha(zone-text-muted-alpha) : text-muted;
+
+    out property <brush> zone-right-bottom-text-primary:   zone-right-bottom-text-enabled ? zone-right-bottom-text-color : text-primary;
+    out property <brush> zone-right-bottom-text-secondary: zone-right-bottom-text-enabled ? zone-right-bottom-text-color.with-alpha(zone-text-secondary-alpha) : text-secondary;
+    out property <brush> zone-right-bottom-text-muted:     zone-right-bottom-text-enabled ? zone-right-bottom-text-color.with-alpha(zone-text-muted-alpha) : text-muted;
 }

@@ -605,6 +605,12 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> zone-left-hex: "#1e1e1e";
     in-out property <string> zone-right-top-hex: "#1e1e1e";
     in-out property <string> zone-right-bottom-hex: "#1e1e1e";
+    // Per-zone custom text colour (区域内字体颜色) hex mirrors, seeded by Rust.
+    // The colour itself lives on Theme; here we only edit the hex string and
+    // persist it — Rust re-derives the Theme colour + enable flag.
+    in-out property <string> zone-left-text-hex: "#e6e8ee";
+    in-out property <string> zone-right-top-text-hex: "#d4d4d4";
+    in-out property <string> zone-right-bottom-text-hex: "#e6e8ee";
 
     // Custom accent override (#custom-accent). When enabled, the accent used for
     // buttons / folder icons / highlights is pinned to `custom-accent-hex` instead
@@ -652,6 +658,9 @@ export component InterfacePanel inherits Rectangle {
                                 string /* #RRGGBB or "" */, float /* alpha */);
     // Enable/disable a zone's custom background, independent of its colour.
     callback persist-zone-enabled(string /* zone */, bool /* enabled */);
+    // Persist one zone's custom text colour. color = "#RRGGBB" or "" to clear
+    // (follow the theme text tiers). Shares the zone's enable toggle.
+    callback persist-zone-text-color(string /* zone */, string /* #RRGGBB or "" */);
     // Custom accent override (#custom-accent): persist the on/off flag and the
     // chosen colour. Empty colour = follow the wallpaper-derived accent.
     callback persist-custom-accent-enabled(bool);
@@ -1442,6 +1451,22 @@ export component InterfacePanel inherits Rectangle {
                     }
                 }
                 SettingRow {
+                    label: root.lang-en ? "Text color" : "字体颜色";
+                    CursorColorInput {
+                        value <=> root.zone-left-text-hex;
+                        preview-color: Theme.zone-left-text-color;
+                        lang-en: root.lang-en;
+                        apply-color(v) => {
+                            root.persist-zone-text-color("left", v);
+                            return true;
+                        }
+                        live-preview(c) => {
+                            Theme.zone-left-text-color = c;
+                            Theme.zone-left-text-enabled = root.zone-left-enabled;
+                        }
+                    }
+                }
+                SettingRow {
                     label: root.lang-en ? "Background transparency" : "背景透明度";
                     show-divider: false;
                     HorizontalLayout {
@@ -1492,6 +1517,22 @@ export component InterfacePanel inherits Rectangle {
                     }
                 }
                 SettingRow {
+                    label: root.lang-en ? "Text color" : "字体颜色";
+                    CursorColorInput {
+                        value <=> root.zone-right-top-text-hex;
+                        preview-color: Theme.zone-right-top-text-color;
+                        lang-en: root.lang-en;
+                        apply-color(v) => {
+                            root.persist-zone-text-color("right-top", v);
+                            return true;
+                        }
+                        live-preview(c) => {
+                            Theme.zone-right-top-text-color = c;
+                            Theme.zone-right-top-text-enabled = root.zone-right-top-enabled;
+                        }
+                    }
+                }
+                SettingRow {
                     label: root.lang-en ? "Background transparency" : "背景透明度";
                     show-divider: false;
                     HorizontalLayout {
@@ -1539,6 +1580,22 @@ export component InterfacePanel inherits Rectangle {
                             return true;
                         }
                         live-preview(c) => { root.zone-right-bottom-bg = c; }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Text color" : "字体颜色";
+                    CursorColorInput {
+                        value <=> root.zone-right-bottom-text-hex;
+                        preview-color: Theme.zone-right-bottom-text-color;
+                        lang-en: root.lang-en;
+                        apply-color(v) => {
+                            root.persist-zone-text-color("right-bottom", v);
+                            return true;
+                        }
+                        live-preview(c) => {
+                            Theme.zone-right-bottom-text-color = c;
+                            Theme.zone-right-bottom-text-enabled = root.zone-right-bottom-enabled;
+                        }
                     }
                 }
                 SettingRow {

@@ -17,7 +17,7 @@ pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// The single source of truth for the build label. Shown verbatim in the sidebar
 /// footer AND in the unlock window's title bar / window title, so both always
 /// agree — edit just this one line each release.
-pub(crate) const BUILD_LABEL: &str = "Build 2026.08.10";
+pub(crate) const BUILD_LABEL: &str = "Build 2026.08.11";
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -1146,7 +1146,7 @@ pub fn run() -> Result<()> {
     }
 
     // Apply the saved per-zone background colours (自定义区域颜色).
-    apply_zone_colors(&window, &store.borrow());
+    apply_zone_colors(&window, &store.borrow(), &bufs);
 
     // Seed the custom-accent editor (#custom-accent) from config so the switch and
     // colour swatch reflect the saved choice. The accent itself is applied by
@@ -1387,6 +1387,7 @@ pub fn run() -> Result<()> {
     {
         let weak = window.as_weak();
         let store = store.clone();
+        let bufs = bufs.clone();
         window.on_persist_zone_color(move |zone: SharedString, color: SharedString, alpha: f32| {
             let zone = zone.as_str();
             let color = color.trim();
@@ -1410,7 +1411,7 @@ pub fn run() -> Result<()> {
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
-                apply_zone_colors(&w, &store.borrow());
+                apply_zone_colors(&w, &store.borrow(), &bufs);
             }
         });
     }
@@ -1419,6 +1420,7 @@ pub fn run() -> Result<()> {
     {
         let weak = window.as_weak();
         let store = store.clone();
+        let bufs = bufs.clone();
         window.on_persist_zone_enabled(move |zone: SharedString, enabled: bool| {
             {
                 let mut s = store.borrow_mut();
@@ -1431,7 +1433,35 @@ pub fn run() -> Result<()> {
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
-                apply_zone_colors(&w, &store.borrow());
+                apply_zone_colors(&w, &store.borrow(), &bufs);
+            }
+        });
+    }
+    // Persist a zone's custom TEXT colour (区域内字体颜色). Shares the zone's
+    // enable toggle, so it only takes visible effect while that zone is on. For
+    // the terminal zone this recolours the terminal's own default text + command
+    // bar; script-driven ANSI colours are left untouched.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_persist_zone_text_color(move |zone: SharedString, color: SharedString| {
+            let color = color.trim();
+            {
+                let mut s = store.borrow_mut();
+                let ok = match zone.as_str() {
+                    "left" => s.set_zone_sidebar_text_color(color),
+                    "right-top" => s.set_zone_right_top_text_color(color),
+                    "right-bottom" => s.set_zone_right_bottom_text_color(color),
+                    _ => return,
+                };
+                if !ok {
+                    return;
+                }
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                apply_zone_colors(&w, &store.borrow(), &bufs);
             }
         });
     }
@@ -6593,8 +6623,12 @@ fn parse_hex_color(value: &str) -> Option<slint::Color> {
 /// Push the saved per-zone background colours into the window (自定义区域颜色).
 /// An empty stored colour disables the zone (it then follows the theme); the
 /// hex mirror still gets a sensible seed so the editor isn't blank.
-fn apply_zone_colors(window: &AppWindow, store: &ConfigStore) {
+fn apply_zone_colors(window: &AppWindow, store: &ConfigStore, bufs: &TermBuffers) {
     let default_hex = if window.get_dark_mode() { "#1e1e1e" } else { "#ffffff" };
+    // Theme default text colours per mode, used to seed the picker hex + preview
+    // when a zone has no custom text colour yet (matches theme.slint text tiers).
+    let default_text_hex = if window.get_dark_mode() { "#e6e8ee" } else { "#1d1d1f" };
+    let default_term_text_hex = if window.get_dark_mode() { "#d4d4d4" } else { "#2d2d2f" };
 
     let apply = |color: &str,
                  alpha: f32,
@@ -6615,6 +6649,41 @@ fn apply_zone_colors(window: &AppWindow, store: &ConfigStore) {
             None => {
                 set_enabled(false);
                 set_hex(default_hex.into());
+            }
+        }
+    };
+
+    // Per-zone TEXT colour (区域内字体颜色). The text override is active only when
+    // the zone itself is enabled AND a valid custom text colour is saved; the
+    // secondary/muted tiers are derived from it inside theme.slint. When inactive
+    // the picker still shows the last/default hex, but the Theme enable flag is
+    // off so the UI falls back to the theme text tiers.
+    let apply_text = |color: &str,
+                      zone_enabled: bool,
+                      fallback_hex: &str,
+                      set_text_enabled: &dyn Fn(bool),
+                      set_text_color: &dyn Fn(slint::Color),
+                      set_text_hex: &dyn Fn(slint::SharedString)|
+     -> Option<(u8, u8, u8)> {
+        match parse_hex_color(color) {
+            Some(c) if zone_enabled => {
+                set_text_color(c);
+                set_text_hex(color.into());
+                set_text_enabled(true);
+                Some((c.red(), c.green(), c.blue()))
+            }
+            Some(c) => {
+                // Valid colour saved but the zone is off: keep the swatch, but
+                // don't recolour anything.
+                set_text_color(c);
+                set_text_hex(color.into());
+                set_text_enabled(false);
+                None
+            }
+            None => {
+                set_text_enabled(false);
+                set_text_hex(fallback_hex.into());
+                None
             }
         }
     };
@@ -6646,6 +6715,41 @@ fn apply_zone_colors(window: &AppWindow, store: &ConfigStore) {
         &|a| window.set_zone_right_bottom_alpha(a),
         &|h| window.set_zone_right_bottom_hex(h),
     );
+
+    apply_text(
+        store.zone_sidebar_text_color(),
+        store.zone_sidebar_enabled(),
+        default_text_hex,
+        &|v| window.set_zone_left_text_enabled(v),
+        &|c| window.set_zone_left_text_color(c),
+        &|h| window.set_zone_left_text_hex(h),
+    );
+    // The terminal zone's text override drives the vt100 default-fg colour.
+    let term_fg_override = apply_text(
+        store.zone_right_top_text_color(),
+        store.zone_right_top_enabled(),
+        default_term_text_hex,
+        &|v| window.set_zone_right_top_text_enabled(v),
+        &|c| window.set_zone_right_top_text_color(c),
+        &|h| window.set_zone_right_top_text_hex(h),
+    );
+    apply_text(
+        store.zone_right_bottom_text_color(),
+        store.zone_right_bottom_enabled(),
+        default_text_hex,
+        &|v| window.set_zone_right_bottom_text_enabled(v),
+        &|c| window.set_zone_right_bottom_text_color(c),
+        &|h| window.set_zone_right_bottom_text_hex(h),
+    );
+
+    // Push the terminal default-foreground override and re-render every terminal
+    // so the change is visible. ANSI/script colours are untouched (see
+    // vt_color_to_slint); only Color::Default text picks this up.
+    set_term_default_fg_override(term_fg_override);
+    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    for tid in tab_ids {
+        rebuild_tab_display(window, bufs, &tid);
+    }
 }
 
 fn validate_output_highlight_rule(
@@ -11907,13 +12011,11 @@ const ANSI16_LIGHT_BG: [(u8, u8, u8); 16] = [
 /// ≥ 0.55) are darkened so they remain readable on a near-white background.
 fn vt_color_to_slint(color: vt100::Color, bold: bool, is_dark: bool) -> slint::Color {
     let (r, g, b) = match color {
-        vt100::Color::Default => {
-            if is_dark {
-                (0xd4, 0xd4, 0xd4)
-            } else {
-                (0x2d, 0x2d, 0x2f)
-            }
-        }
+        // The terminal's OWN default text colour. Honours the user's custom
+        // "terminal zone text colour" (right-top) when set; otherwise the
+        // theme default. ANSI-driven colours (Idx / Rgb below) are unaffected,
+        // so script output that explicitly sets a colour is never overridden.
+        vt100::Color::Default => vt_default_fg_rgb(is_dark),
         vt100::Color::Idx(i) => idx_to_rgb(i, bold, is_dark),
         vt100::Color::Rgb(r, g, b) => {
             if is_dark {
@@ -11926,7 +12028,33 @@ fn vt_color_to_slint(color: vt100::Color, bold: bool, is_dark: bool) -> slint::C
     slint::Color::from_rgb_u8(r, g, b)
 }
 
+/// Process-global override for the terminal's default foreground colour, set
+/// from the "right-top" zone's custom text colour. Encoded as `1 << 24 | rgb`
+/// when active, `0` when unset (follow the theme default). Read on every span
+/// render, so it's a plain relaxed atomic rather than threading a parameter
+/// through the whole terminal render path.
+static TERM_DEFAULT_FG_OVERRIDE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Set (or clear, with `None`) the terminal default-foreground override. Callers
+/// must trigger a terminal re-render afterwards for it to take visible effect.
+pub(crate) fn set_term_default_fg_override(rgb: Option<(u8, u8, u8)>) {
+    let encoded = match rgb {
+        Some((r, g, b)) => (1u32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
+        None => 0,
+    };
+    TERM_DEFAULT_FG_OVERRIDE.store(encoded, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn vt_default_fg_rgb(is_dark: bool) -> (u8, u8, u8) {
+    let encoded = TERM_DEFAULT_FG_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if encoded & (1 << 24) != 0 {
+        return (
+            ((encoded >> 16) & 0xff) as u8,
+            ((encoded >> 8) & 0xff) as u8,
+            (encoded & 0xff) as u8,
+        );
+    }
     if is_dark {
         (0xd4, 0xd4, 0xd4)
     } else {

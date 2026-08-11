@@ -694,6 +694,20 @@ pub struct ConfigFile {
     pub zone_right_bottom_color: String,
     #[serde(default)]
     pub zone_right_bottom_alpha: f32,
+    /// Custom per-zone *text* colours (#custom-zone-text). Each is #RRGGBB; empty
+    /// follows the theme. Only the primary text colour is stored — the secondary
+    /// and muted tiers are derived from it by lowering opacity (see theme.slint),
+    /// so a single pick keeps the original浓/淡 hierarchy. Applied only while the
+    /// zone's `*_enabled` flag is on, sharing the same toggle as the background.
+    /// For the terminal zone this recolours only the terminal's own default
+    /// input/output text and the command bar; script-driven ANSI colours are
+    /// untouched.
+    #[serde(default)]
+    pub zone_sidebar_text_color: String,
+    #[serde(default)]
+    pub zone_right_top_text_color: String,
+    #[serde(default)]
+    pub zone_right_bottom_text_color: String,
     /// Per-zone enable flags (#custom-zone-colors). Kept separate from the colour
     /// so toggling a zone off remembers its last colour instead of clearing it.
     #[serde(default)]
@@ -1894,6 +1908,66 @@ impl ConfigStore {
     }
     pub fn set_zone_right_bottom_alpha(&mut self, v: f32) {
         self.cache.zone_right_bottom_alpha = v.clamp(0.10, 1.0);
+    }
+
+    // --- Custom per-zone text colours (#custom-zone-text) -------------------
+    // Only a primary #RRGGBB is stored; the secondary/muted tiers are derived in
+    // theme.slint by lowering opacity. Empty follows the theme. Setters mirror
+    // the background-colour setters: empty clears, malformed non-empty returns
+    // false. Applied only while the shared per-zone `*_enabled` flag is on.
+    pub fn zone_sidebar_text_color(&self) -> &str {
+        if normalize_hex_color(&self.cache.zone_sidebar_text_color).is_some() {
+            &self.cache.zone_sidebar_text_color
+        } else {
+            ""
+        }
+    }
+    pub fn set_zone_sidebar_text_color(&mut self, color: &str) -> bool {
+        if color.trim().is_empty() {
+            self.cache.zone_sidebar_text_color.clear();
+            return true;
+        }
+        let Some(normalized) = normalize_hex_color(color) else {
+            return false;
+        };
+        self.cache.zone_sidebar_text_color = normalized;
+        true
+    }
+    pub fn zone_right_top_text_color(&self) -> &str {
+        if normalize_hex_color(&self.cache.zone_right_top_text_color).is_some() {
+            &self.cache.zone_right_top_text_color
+        } else {
+            ""
+        }
+    }
+    pub fn set_zone_right_top_text_color(&mut self, color: &str) -> bool {
+        if color.trim().is_empty() {
+            self.cache.zone_right_top_text_color.clear();
+            return true;
+        }
+        let Some(normalized) = normalize_hex_color(color) else {
+            return false;
+        };
+        self.cache.zone_right_top_text_color = normalized;
+        true
+    }
+    pub fn zone_right_bottom_text_color(&self) -> &str {
+        if normalize_hex_color(&self.cache.zone_right_bottom_text_color).is_some() {
+            &self.cache.zone_right_bottom_text_color
+        } else {
+            ""
+        }
+    }
+    pub fn set_zone_right_bottom_text_color(&mut self, color: &str) -> bool {
+        if color.trim().is_empty() {
+            self.cache.zone_right_bottom_text_color.clear();
+            return true;
+        }
+        let Some(normalized) = normalize_hex_color(color) else {
+            return false;
+        };
+        self.cache.zone_right_bottom_text_color = normalized;
+        true
     }
 
     pub fn zone_sidebar_enabled(&self) -> bool {
