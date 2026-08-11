@@ -515,3 +515,9 @@ msgstr "登录身份"
 
 msgid "Note"
 msgstr "备注"
+
+msgid "Force SCP transfer mode (skip SFTP subsystem)"
+msgstr "强制使用 SCP 传输（跳过 SFTP 子系统）"
+
+msgid "Only enable for hosts where the SFTP panel fails to load or transfer (e.g. NAS appliances or BusyBox-based devices). SCP is slower and lacks resume, so leave it OFF unless SFTP is broken."
+msgstr "仅当主机的 SFTP 面板无法加载或传输文件时才启用（例如 NAS 设备或基于 BusyBox 的设备）。SCP 速度较慢且不支持断点续传，除非 SFTP 确实无法使用，否则请保持关闭。"

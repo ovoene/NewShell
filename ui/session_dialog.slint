@@ -784,7 +784,7 @@ export component SessionDialog inherits Rectangle {
                     text: @tr("Linux / macOS / BSD and other POSIX shells (bash, zsh, sh): leave UNCHECKED (off) — this enables SFTP directory-follow and live CPU / memory / disk / process monitoring.\nWindows (PowerShell / cmd), network gear (switches, routers, firewalls) and other non-POSIX shells: CHECK it (on) — these don't support the injection hooks, so leaving it unchecked would leak setup commands or garbled text into the terminal.");
                     color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
                 }
-                // Force-SCP toggle (#SCP-force): some servers (黑群晖, BusyBox,
+                // Force-SCP toggle (#SCP-force): some servers (NAS appliances, BusyBox,
                 // restricted shells) advertise a working sftp subsystem but
                 // actually misbehave on real ops. Checking this skips SFTP and
                 // always uses the SCP fallback for file transfers.
@@ -814,7 +814,7 @@ export component SessionDialog inherits Rectangle {
                     }
                 }
                 Text {
-                    text: @tr("Only enable for hosts where the SFTP panel fails to load or transfer (e.g. 黑群晖 / BusyBox). SCP is slower and lacks resume, so leave it OFF unless SFTP is broken.");
+                    text: @tr("Only enable for hosts where the SFTP panel fails to load or transfer (e.g. NAS appliances or BusyBox-based devices). SCP is slower and lacks resume, so leave it OFF unless SFTP is broken.");
                     color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
                 }
             }

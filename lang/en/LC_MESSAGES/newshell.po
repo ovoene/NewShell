@@ -515,3 +515,9 @@ msgstr "Login identity"
 
 msgid "Note"
 msgstr "Note"
+
+msgid "Force SCP transfer mode (skip SFTP subsystem)"
+msgstr "Force SCP transfer mode (skip SFTP subsystem)"
+
+msgid "Only enable for hosts where the SFTP panel fails to load or transfer (e.g. NAS appliances or BusyBox-based devices). SCP is slower and lacks resume, so leave it OFF unless SFTP is broken."
+msgstr "Only enable for hosts where the SFTP panel fails to load or transfer (e.g. NAS appliances or BusyBox-based devices). SCP is slower and lacks resume, so leave it OFF unless SFTP is broken."

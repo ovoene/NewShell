@@ -422,7 +422,7 @@ pub struct Session {
     #[serde(default)]
     pub disable_shell_integration: bool,
     /// Force the SCP transfer backend even when the remote advertises a working
-    /// `sftp` subsystem. Some boxes (notably 黑群晖 / certain BusyBox and
+    /// `sftp` subsystem. Some boxes (notably NAS appliances / certain BusyBox and
     /// restricted shells) open the sftp subsystem but misbehave on real ops; on
     /// others SFTP is simply flaky. This skips SFTP entirely and always uses the
     /// SCP fallback so file transfer stays reliable (#SCP-force).

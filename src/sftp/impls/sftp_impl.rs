@@ -497,7 +497,7 @@ async fn run_sftp(
     }
 
     // Force-SCP mode: the user explicitly asked to skip SFTP for this session
-    // (e.g. a 黑群晖 / BusyBox box whose sftp subsystem opens but misbehaves).
+    // (e.g. a NAS / BusyBox box whose sftp subsystem opens but misbehaves).
     // We still connected + authenticated normally; we just route transfers
     // through the SCP fallback instead of the sftp subsystem (#SCP-force).
     if session.force_scp {
@@ -514,8 +514,8 @@ async fn run_sftp(
         .await
         .context("open sftp channel")?;
     if channel.request_subsystem(true, "sftp").await.is_err() {
-        // Server has no usable `sftp` subsystem — common on 黑群晖 / Synology
-        // DSM, BusyBox boxes and restricted shells. FinalShell falls back to SCP
+        // Server has no usable `sftp` subsystem — common on NAS appliances
+        // (Synology DSM), BusyBox boxes and restricted shells. FinalShell falls back to SCP
         // (plain `scp` over a shell channel, which only needs a normal login
         // shell); we do the same so file transfer still works (#SCP-fallback).
         let _ = events.send(SessionEvent::SftpStatus(t(
@@ -527,7 +527,7 @@ async fn run_sftp(
     let sftp = SftpSession::new(channel.into_stream())
         .await
         .context("sftp handshake")?;
-    // Smart fallback: some servers (e.g. 黑群晖 / certain BusyBox or restricted
+    // Smart fallback: some servers (e.g. NAS appliances / certain BusyBox or restricted
     // shells) let the `sftp` subsystem *open* but then misbehave on real ops —
     // the handshake succeeds yet `stat` returns an error (or hangs), so the
     // panel would silently show nothing. Probe the current directory with a
@@ -1377,7 +1377,7 @@ async fn run_sftp(
 
 // ===== SCP fallback worker (server without a usable `sftp` subsystem) =====
 //
-// Some servers — 黑群晖 / Synology DSM, BusyBox boxes, restricted shells — don't
+// Some servers — NAS appliances (Synology DSM), BusyBox boxes, restricted shells — don't
 // expose a working `sftp` subsystem, so the SFTP panel can't open. FinalShell
 // and friends fall back to SCP (`scp` over a plain shell channel, which only
 // needs a login shell). When `request_subsystem("sftp")` fails we take the same
@@ -1520,7 +1520,7 @@ fn mode_from_perms(perms: &str) -> u32 {
 
 /// List a remote directory via `ls` (SCP fallback). Tries the GNU epoch form
 /// first and falls back to the portable human form if the server lacks
-/// `--time-style` (e.g. BusyBox on 黑群晖).
+/// `--time-style` (e.g. BusyBox on NAS appliances).
 async fn shell_list(
     handle: &client::Handle<SftpClientHandler>,
     path: &str,
