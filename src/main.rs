@@ -14,6 +14,7 @@ mod sftp;
 mod ssh;
 mod terminal;
 mod ui;
+mod update;
 mod wallpaper;
 
 fn main() -> anyhow::Result<()> {

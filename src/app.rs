@@ -913,6 +913,9 @@ pub fn run() -> Result<()> {
     // about area. Single source of truth is BUILD_LABEL (also drives the unlock
     // window title), so both surfaces always agree.
     window.set_app_version(BUILD_LABEL.into());
+    // Semantic version (CARGO_PKG_VERSION, e.g. "8.8.10") shown in the About
+    // dialog as "当前版本 Ver …" and used as the baseline for the update check.
+    window.set_app_semver(crate::update::current_version().into());
 
     // Pick one inspirational line for the welcome page, chosen at random on each
     // launch (replaces the old "newshell" title + tagline).
@@ -2303,6 +2306,86 @@ pub fn run() -> Result<()> {
         .map(|s| (*s).into())
         .collect();
         window.set_about_libs(ModelRc::from(Rc::new(VecModel::from(libs))));
+    }
+
+    // --- About dialog: update check ("check for updates" probe) -------------
+    // Opening About fires check-update(). We run one blocking GitHub Releases
+    // query on a detached thread (never on the UI thread — GitHub can be slow or
+    // blocked here) and push the localized outcome back via the event loop.
+    // A single AtomicU8 gate caches the result for the process lifetime so
+    // reopening About doesn't re-hit the API: 0 = idle/needs check,
+    // 1 = in flight, 2 = finished with a definitive answer. A failed check
+    // resets to 0 so it retries next time (e.g. once the network is back).
+    {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let weak = window.as_weak();
+        let gate = Arc::new(AtomicU8::new(0));
+        window.on_check_update(move || {
+            let Some(w) = weak.upgrade() else { return };
+            // Bail unless we're idle (0). If a check is running (1) or already
+            // done (2), keep whatever the dialog is currently showing.
+            if gate.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return;
+            }
+            w.set_update_btn_visible(false);
+            w.set_update_status(t("正在检查更新…", "Checking for updates…").into());
+            let weak2 = w.as_weak();
+            let gate2 = gate.clone();
+            std::thread::spawn(move || {
+                let result = crate::update::check_latest();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak2.upgrade() else { return };
+                    match result {
+                        crate::update::UpdateCheck::UpToDate => {
+                            w.set_update_status(
+                                t("已是最新版本", "You're on the latest version").into(),
+                            );
+                            w.set_update_btn_visible(false);
+                            gate2.store(2, Ordering::SeqCst);
+                        }
+                        crate::update::UpdateCheck::Newer { latest } => {
+                            let msg = if crate::i18n::is_en() {
+                                format!("New version available Ver {latest}")
+                            } else {
+                                format!("发现新版本 Ver {latest}")
+                            };
+                            w.set_update_status(msg.into());
+                            w.set_update_btn_visible(true);
+                            gate2.store(2, Ordering::SeqCst);
+                        }
+                        crate::update::UpdateCheck::Failed => {
+                            w.set_update_status(
+                                t("当前网络无法检查更新", "Can't check for updates right now")
+                                    .into(),
+                            );
+                            w.set_update_btn_visible(false);
+                            gate2.store(0, Ordering::SeqCst); // allow a retry next open
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_open_release_page(move || {
+            // Keep the weak handle alive for symmetry with other handlers; the
+            // action itself just launches the OS default browser.
+            let _ = weak.upgrade();
+            let url = crate::update::RELEASES_PAGE_URL;
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("explorer").arg(url).spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open").arg(url).spawn();
+            }
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+            }
+        });
     }
 
     wire_tab_callbacks(

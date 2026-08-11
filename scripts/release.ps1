@@ -112,8 +112,21 @@ if ($DryRun) {
     Set-Content -LiteralPath $cargoLockPath -Value $newCargoLock -NoNewline
 }
 
-Run-Cargo check --locked
-Run-CheckedOutput "newshell $version" cargo run --locked -- --version
+# Self-check requires a local Rust toolchain. Some release machines don't have
+# one (the build is verified on a separate dev box / in GitHub Actions), so we
+# probe for `cargo` and only self-check when it's actually available. When it's
+# missing we print a clear notice and continue straight to commit/tag/push —
+# the authoritative `cargo build --locked` still runs in CI on push.
+$cargoAvailable = [bool] (Get-Command cargo -ErrorAction SilentlyContinue)
+if ($cargoAvailable) {
+    Write-Host "Rust toolchain detected -> running local self-check."
+    Run-Cargo check --locked
+    Run-CheckedOutput "newshell $version" cargo run --locked -- --version
+} else {
+    Write-Warning "No Rust toolchain (cargo) found -> SKIPPING local self-check."
+    Write-Warning "The version bump was NOT compiled here. GitHub Actions will run"
+    Write-Warning "'cargo build --locked' on push; if it fails, the release won't publish."
+}
 
 Run-Git add Cargo.toml Cargo.lock
 Run-Git commit -m "Release $Tag"

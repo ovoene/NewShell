@@ -1,6 +1,6 @@
 [package]
 name = "newshell"
-version = "8.8.10"
+version = "8.8.11"
 edition = "2021"
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"
@@ -91,6 +91,14 @@ dark-light = "1"
 # and the embedded PNG window icon on Linux. On Windows the icon comes from the
 # .ico embedded by winresource at link time; on macOS from the app bundle.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+# Synchronous HTTP + rustls client used ONLY by the About dialog's "check for
+# updates" probe (queries the public GitHub Releases API). Default features are
+# rustls + gzip (no OpenSSL/native-tls), which keeps it dependency-light and
+# cross-platform and matches the ureq entry already pinned in Cargo.lock. Runs
+# on a detached std::thread so it never blocks the Slint event loop; results are
+# pushed back with slint::invoke_from_event_loop. rustls bundles webpki-roots so
+# we don't depend on the OS trust store being populated.
+ureq = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Native Wayland clipboard (wlr-data-control protocol) so copy/paste works on

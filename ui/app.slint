@@ -347,6 +347,19 @@ export component AppWindow inherits Window {
     property <length> toolbar-y:
         (root.custom-titlebar ? 43px : 5px + root.titlebar-inset) + root.toolbar-y-off;
     in-out property <bool> about-open: false;     // centered About dialog
+    // --- About dialog: version display + update check (Settings → About) ----
+    // app-semver is the plain semantic version (e.g. "8.8.10") set by Rust from
+    // CARGO_PKG_VERSION — shown as "当前版本 Ver X.Y.Z", distinct from app-version
+    // (the free-form "Build …" label). Opening About fires check-update(); Rust
+    // runs a background probe against the GitHub Releases API and writes the
+    // outcome into update-status (a ready-to-display, localized line) and
+    // update-btn-visible (true only when a newer release exists). The button
+    // calls open-release-page() → opens the Releases page in the browser.
+    in property <string> app-semver;
+    in-out property <string> update-status;
+    in-out property <bool> update-btn-visible: false;
+    callback check-update();
+    callback open-release-page();
     in-out property <bool> shortcuts-open: false; // centered keyboard-shortcuts dialog (#103)
     // --- Startup-password (whole-file encryption) management --------------
     // pw-encrypted mirrors ConfigStore::is_encrypted(): Rust sets it at startup
@@ -2626,6 +2639,9 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.settings-open = false;
                         root.about-open = true;
+                        // Kick off a background update check each time About opens;
+                        // Rust caches within a run so this won't hammer the API.
+                        root.check-update();
                     }
                 }
                 HorizontalLayout {
@@ -3622,7 +3638,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 520px;
-            height: 188px;
+            height: 236px;
             background: Theme.bg-panel;
             border-radius: Theme.radius-lg;
             border-width: 1px;
@@ -3690,6 +3706,34 @@ export component AppWindow inherits Window {
                         color: Theme.text-secondary;
                         font-size: Theme.fs-sm;
                         wrap: word-wrap;
+                    }
+
+                    // Current version (semantic), distinct from the Build label.
+                    Text {
+                        text: (root.lang-en ? "Current version Ver " : "当前版本 Ver ") + root.app-semver;
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+
+                    // --- Update-check row (the highlighted area in the mockup) ---
+                    // Shows a localized status line and, only when a newer release
+                    // exists, a button that opens the Releases page in the browser.
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        Text {
+                            text: root.update-status;
+                            color: root.update-btn-visible ? Theme.accent : Theme.text-muted;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                        }
+                        PrimaryButton {
+                            visible: root.update-btn-visible;
+                            height: 26px;
+                            text: root.lang-en ? "Go to download" : "前往下载";
+                            clicked => { root.open-release-page(); }
+                        }
                     }
                 }
             }
