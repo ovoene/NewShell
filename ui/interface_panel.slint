@@ -584,6 +584,11 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> collapse-sftp-default;
     in-out property <bool> sync-upload-enabled;
     in-out property <bool> download-always-ask;
+    // Diagnostics log (#diag-switch). Off by default; the app writes no logs
+    // unless this is on. `diag-log-path` is the file Rust actually opened (or
+    // would open), shown so the user can find and send it.
+    in-out property <bool> diag-log;
+    in property <string> diag-log-path;
     in-out property <bool> welcome-as-sidebar;
     in-out property <bool> quick-commands-as-sidebar;
     in-out property <float> wallpaper-overlay;   // frosted-panel opacity 0.30-1.00
@@ -650,6 +655,8 @@ export component InterfacePanel inherits Rectangle {
     callback set-collapse-sftp-default(bool);
     callback set-sync-upload-enabled(bool);
     callback set-download-always-ask(bool);
+    callback set-diag-log(bool);
+    callback open-diag-log-dir();   // reveal the log's folder in the OS file manager
     callback set-welcome-as-sidebar(bool);
     callback set-quick-commands-as-sidebar(bool);
     callback persist-wallpaper-overlay(float);   // save the overlay opacity
@@ -732,6 +739,11 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E2C4}"; label: root.lang-en ? "Download" : "下载";
                     active: root.ifd-page == "download";
                     clicked => { root.ifd-page = "download"; }
+                }
+                NavItem {
+                    icon: "\u{E868}"; label: root.lang-en ? "Diagnostics" : "诊断";
+                    active: root.ifd-page == "diag";
+                    clicked => { root.ifd-page = "diag"; }
                 }
             }
         }
@@ -1867,6 +1879,68 @@ export component InterfacePanel inherits Rectangle {
                         on: root.download-always-ask;
                         toggled(v) => { root.download-always-ask = v; root.set-download-always-ask(v); }
                     }
+                }
+            }
+
+            // --- Diagnostics page --------------------------------------
+            // Off by default: NewShell records no logs. The switch exists so a
+            // problem can be captured from a launch that still works, without
+            // shipping a special build (#diag-switch).
+            if root.ifd-page == "diag" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 0;
+                alignment: start;
+                SectionHeader { text: root.lang-en ? "DIAGNOSTICS" : "诊断"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Write a diagnostic log" : "记录诊断日志";
+                    desc: root.lang-en
+                        ? "Records startup milestones, window/renderer events and crash details to a text file. Keep this off for normal use."
+                        : "把启动过程、窗口/渲染事件和崩溃信息写入一个文本文件。日常使用请保持关闭。";
+                    show-divider: false;
+                    Switch {
+                        on: root.diag-log;
+                        toggled(v) => { root.diag-log = v; root.set-diag-log(v); }
+                    }
+                }
+                Rectangle { height: 10px; }
+                Text {
+                    text: root.diag-log
+                        ? (root.lang-en
+                            ? "Logging is on. Runtime problems are being recorded now — but to capture a crash that happens during startup, leave this switch on and restart, then reproduce."
+                            : "日志已开启。运行中的问题现在就会被记录 —— 但如果是启动阶段的崩溃,请保持开关开启后重启,再复现一次。")
+                        : (root.lang-en
+                            ? "No log file is written while this is off."
+                            : "关闭状态下不会写入任何日志文件。");
+                    color: root.diag-log ? Theme.accent : Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 18px; }
+                SectionHeader { text: root.lang-en ? "LOG FILE" : "日志文件"; height: 24px; }
+                Text {
+                    text: root.diag-log-path;
+                    color: Theme.text-secondary;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 10px; }
+                HorizontalLayout {
+                    alignment: start;
+                    GhostButton {
+                        text: root.lang-en ? "Open folder" : "打开所在文件夹";
+                        clicked => { root.open-diag-log-dir(); }
+                    }
+                }
+                Rectangle { height: 10px; }
+                Text {
+                    text: root.lang-en
+                        ? "The file is capped at 1 MB and starts over past that, so it cannot fill the disk. Send it over when reporting a problem."
+                        : "文件上限 1 MB,超过后从头覆盖,不会占满磁盘。反馈问题时把它发出来即可。";
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
                 }
             }
 

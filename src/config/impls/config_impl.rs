@@ -536,6 +536,13 @@ pub struct ConfigFile {
     /// femtovg/skia. Missing or foreign-platform values use the platform default.
     #[serde(default)]
     pub renderer_mode: String,
+    /// Write `newshell-diag.log` beside the executable. Off by default: the app
+    /// records no logs unless the user turns this on to chase a problem
+    /// (Settings › Interface › Diagnostics). Mirrored into the encrypted
+    /// envelope's plaintext header so it can be honoured before unlock —
+    /// otherwise a crash during startup would never be captured (#diag-switch).
+    #[serde(default)]
+    pub diag_log: bool,
     /// Terminal font family. Empty = the built-in default ("NewShell Mono").
     #[serde(default)]
     pub font_family: String,
@@ -853,6 +860,11 @@ struct EncryptedEnvelope {
     /// before the first (unlock) window. Not sensitive.
     #[serde(default)]
     renderer_mode: String,
+    /// Diagnostics-log switch, mirrored in plaintext for the same reason: the
+    /// log has to be open before the unlock window exists, or a startup crash
+    /// goes unrecorded. Not sensitive (#diag-switch).
+    #[serde(default)]
+    diag_log: bool,
     /// Non-secret display preferences, mirrored in plaintext so the unlock
     /// window can follow the user's theme/wallpaper before the config body is
     /// decrypted. None of these reveal session data.
@@ -918,6 +930,16 @@ impl LoadedConfig {
         match self {
             LoadedConfig::Ready(store) => store.renderer_mode(),
             LoadedConfig::Locked(locked) => locked.renderer_mode(),
+        }
+    }
+
+    /// Diagnostics-log switch, available in both states so the log can be opened
+    /// before the unlock window is built — a startup crash usually happens
+    /// before (or while) that window appears (#diag-switch).
+    pub fn diag_log(&self) -> bool {
+        match self {
+            LoadedConfig::Ready(store) => store.diag_log(),
+            LoadedConfig::Locked(locked) => locked.diag_log(),
         }
     }
 }
@@ -1056,6 +1078,7 @@ impl ConfigStore {
         Ok(EncryptedEnvelope {
             newshell_enc: 1,
             renderer_mode: cfg.renderer_mode.clone(),
+            diag_log: cfg.diag_log,
             theme_pref: cfg.theme_pref.clone(),
             wallpaper: cfg.wallpaper.clone(),
             ui_scale: cfg.ui_scale,
@@ -2087,6 +2110,15 @@ impl ConfigStore {
         self.cache.download_always_ask = ask;
     }
 
+    /// Whether `newshell-diag.log` is written (default false) (#diag-switch).
+    pub fn diag_log(&self) -> bool {
+        self.cache.diag_log
+    }
+
+    pub fn set_diag_log(&mut self, on: bool) {
+        self.cache.diag_log = on;
+    }
+
     // ── Session groups / folders (#41) ────────────────────────────────────
 
     /// Explicit groups (empty folders included). "default" is implicit.
@@ -2689,6 +2721,12 @@ impl LockedStore {
             "gpu" => "gpu",
             _ => "software",
         }
+    }
+
+    /// Diagnostics-log switch read from the plaintext envelope header, so the log
+    /// can be opened before the unlock window is created (#diag-switch).
+    pub fn diag_log(&self) -> bool {
+        self.envelope.diag_log
     }
 
     /// Theme preference ("system" | "dark" | "light") mirrored in the plaintext

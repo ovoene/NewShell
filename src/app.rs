@@ -17,7 +17,7 @@ pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// The single source of truth for the build label. Shown verbatim in the sidebar
 /// footer AND in the unlock window's title bar / window title, so both always
 /// agree — edit just this one line each release.
-pub(crate) const BUILD_LABEL: &str = "Build 2026.08.11";
+pub(crate) const BUILD_LABEL: &str = "Build 2026.08.18";
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -534,6 +534,22 @@ fn setup_windows_platform(renderer_mode: &str) {
         },
         "initializing Windows renderer"
     );
+    // #diag-switch: the single most important line in the log. renderer_mode
+    // "auto" resolves to None above, which means Slint picks its own default —
+    // femtovg (OpenGL) — so BOTH "auto" and "gpu" are GPU paths. Only "software"
+    // is guaranteed to run without a GL context.
+    crate::diag::mark(&format!(
+        "renderer: config renderer_mode={renderer_mode:?} → requesting {} (from {}); needs a GL context = {}",
+        renderer
+            .as_deref()
+            .unwrap_or("<unset: Slint default = femtovg/OpenGL>"),
+        if env_backend.is_some() {
+            "SLINT_BACKEND env"
+        } else {
+            "saved settings"
+        },
+        renderer.as_deref() != Some("software")
+    ));
     let backend = builder
         .with_window_attributes_hook(|attrs| {
             attrs
@@ -544,11 +560,25 @@ fn setup_windows_platform(renderer_mode: &str) {
 
     match backend {
         Ok(backend) => {
+            // #diag-switch
+            crate::diag::mark(&format!(
+                "renderer: winit backend built OK (renderer={}) — note the GL context is NOT created yet; femtovg creates it lazily at first paint",
+                renderer.as_deref().unwrap_or("auto→femtovg")
+            ));
             if slint::platform::set_platform(Box::new(backend)).is_err() {
+                crate::diag::mark("renderer: set_platform FAILED — platform was already initialized"); // #diag-switch
                 tracing::warn!("Windows winit backend was already initialized");
             }
         }
-        Err(err) => tracing::warn!("failed to initialize Windows winit backend: {err}"),
+        Err(err) => {
+            // #diag-switch: NOTE there is no fallback here — Slint keeps its own
+            // default platform (femtovg), so a failure at this point still ends
+            // up attempting GL at first paint.
+            crate::diag::mark(&format!(
+                "renderer: winit backend build FAILED: {err} — no software fallback is implemented, Slint's default (femtovg/GL) will be used instead"
+            ));
+            tracing::warn!("failed to initialize Windows winit backend: {err}")
+        }
     }
 }
 
@@ -836,7 +866,21 @@ pub fn run() -> Result<()> {
     // Load the renderer preference before creating any Slint window. Reuse the
     // same store for the rest of the app so startup does not read the config
     // twice merely to select a backend (#280).
+    crate::diag::mark("config: loading (exe_dir/config/sessions.json)"); // #diag-switch
     let loaded = ConfigStore::load().context("failed to load config")?;
+    // Resolve the diagnostics switch as early as the config allows: the flag is
+    // mirrored in the encrypted envelope's plaintext header, so this works in the
+    // Locked state too. Breadcrumbs recorded before this point were buffered in
+    // memory and are flushed here (#diag-switch).
+    crate::diag::configure(loaded.diag_log());
+    crate::diag::mark(&format!(
+        "config: loaded, state={}, renderer_mode={:?}", // #diag-switch
+        match &loaded {
+            LoadedConfig::Ready(_) => "plaintext/ready",
+            LoadedConfig::Locked(_) => "encrypted/locked (startup password)",
+        },
+        loaded.renderer_mode()
+    ));
     // Windows frameless-window attributes must be fixed before the first Slint
     // window is created; doing it afterwards leaves some Win10 machines with an
     // invisible frame that shifts mouse hit testing (#193). The renderer_mode is
@@ -859,7 +903,10 @@ pub fn run() -> Result<()> {
         LoadedConfig::Ready(store) => (store, false),
         LoadedConfig::Locked(locked) => match unlock_config(locked)? {
             Some(store) => (store, true),
-            None => return Ok(()), // user exited at the lock screen
+            None => {
+                crate::diag::mark("unlock: user exited at the lock screen — clean exit"); // #diag-switch
+                return Ok(()); // user exited at the lock screen
+            }
         },
     };
 
@@ -897,7 +944,9 @@ pub fn run() -> Result<()> {
     // `newshell.desktop` entry and show our icon in the dock/taskbar.  (On
     // Windows the icon comes from the embedded .ico, so this is a no-op there.)
     let _ = slint::set_xdg_app_id("newshell");
+    crate::diag::mark("main-window: AppWindow::new() — creates the native window (this is when the taskbar icon appears)"); // #diag-switch
     let window = AppWindow::new().context("failed to build Slint window")?;
+    crate::diag::mark("main-window: AppWindow::new() OK"); // #diag-switch
     // After the detached startup-password window closes, keep the first main-UI
     // frame behind an opaque theme-coloured cover. Once the native window has
     // appeared and settled, clearing this flag lets Slint fade the cover out.
@@ -1167,10 +1216,16 @@ pub fn run() -> Result<()> {
     // missing custom file falls back to the plain theme).
     {
         let id = store.borrow().wallpaper().to_string();
+        // #diag-switch: a custom wallpaper is decoded and handed to the renderer
+        // as a (potentially very large) texture here, which is a plausible
+        // first-paint failure point on a weak GPU. The id tells us whether this
+        // machine even has one set.
+        crate::diag::mark(&format!("wallpaper: applying id={id:?}"));
         // Restoring a saved wallpaper must not override the user's persisted
         // light/dark preference. Built-in wallpapers only suggest their paired
         // theme when the user actively selects them (#theme-persistence).
         apply_wallpaper(&window, &store.borrow(), &bufs, &id, false);
+        crate::diag::mark("wallpaper: applied"); // #diag-switch
     }
     // Editable inputs (e.g. the SFTP path bar) need a CJK-capable font: the
     // embedded mono font has no Chinese glyphs and native TextInput doesn't
@@ -1245,6 +1300,50 @@ pub fn run() -> Result<()> {
             let _ = s.save();
         });
     }
+
+    // Interface setting: the diagnostics log (#diag-switch). Off by default — the
+    // app writes no log files. Toggling it on takes effect immediately so a
+    // *runtime* problem can be captured without a restart; a *startup* crash needs
+    // the switch left on across a relaunch, which the settings page spells out.
+    window.set_diag_log(store.borrow().diag_log());
+    window.set_diag_log_path(crate::diag::log_path().into());
+    {
+        let store = store.clone();
+        let weak = window.as_weak();
+        window.on_set_diag_log(move |on| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_diag_log(on);
+                let _ = s.save();
+            }
+            crate::diag::set_enabled(on);
+            crate::diag::mark(if on {
+                "diag: switched ON from Settings → Interface → Diagnostics"
+            } else {
+                "diag: switched OFF from Settings → Interface → Diagnostics"
+            });
+            // Enabling may fall back to %TEMP% when the exe directory is not
+            // writable, so re-read the path the sink actually opened.
+            if let Some(w) = weak.upgrade() {
+                w.set_diag_log_path(crate::diag::log_path().into());
+            }
+        });
+    }
+    window.on_open_diag_log_dir(|| {
+        let dir = crate::diag::log_dir();
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&dir).spawn();
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+        }
+    });
 
     // Interface setting: collapse the sidebars by default (#78). Seed the
     // checkboxes, apply the collapsed state once at startup, and persist toggles.
@@ -2477,7 +2576,9 @@ pub fn run() -> Result<()> {
     let exit_confirmed = Rc::new(Cell::new(false));
 
     // --- System sampler (1 Hz) ------------------------------------------
+    crate::diag::mark("sampler: SystemSampler::new()"); // #diag-switch
     let sampler = Rc::new(Mutex::new(SystemSampler::new()));
+    crate::diag::mark("sampler: SystemSampler::new() OK"); // #diag-switch
     let weak = window.as_weak();
     let tick_sampler = sampler.clone();
     let tick_statuses = tab_statuses.clone();
@@ -2999,7 +3100,57 @@ pub fn run() -> Result<()> {
         });
     }
 
-    window.run().context("event loop exited with error")?;
+    // #diag-switch: startup heartbeat. Without it, "died while creating the GL
+    // context during the first paint" and "painted fine, then died 5 s later"
+    // both leave the same last breadcrumb, which is precisely the ambiguity it
+    // resolves. A timer callback only runs once the event loop is pumping, so:
+    //   * NO heartbeat lines at all → death at/just before the first paint
+    //     (renderer / GL context);
+    //   * heartbeats up to +4s then silence → the window was alive and rendering,
+    //     so the cause is something later, not the renderer.
+    // This is what pinned down the original Win10 crash: heartbeats ran, so the
+    // renderer was exonerated and the panic line named the real culprit (a
+    // re-entrant RefCell borrow in Slint's AccessKit bridge — see Cargo.toml).
+    // Stops on its own after 20 s so a normal session doesn't accumulate lines.
+    {
+        let beat = slint::Timer::default();
+        let mut ticks = 0u32;
+        beat.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(1000),
+            move || {
+                ticks += 1;
+                // Past the window of interest: keep the (harmless) timer but stop
+                // writing lines, so a long normal session logs nothing.
+                if ticks > 20 {
+                    return;
+                }
+                crate::diag::mark(&format!(
+                    "heartbeat #{ticks}: event loop alive and pumping"
+                ));
+                if ticks == 20 {
+                    crate::diag::mark("heartbeat: startup healthy — no more heartbeat lines");
+                }
+            },
+        );
+        // Same trick as the sampler timer below: Slint timers cancel themselves
+        // on drop, so park it for the lifetime of the process.
+        Box::leak(Box::new(beat));
+    }
+
+    // #diag-switch: THE decisive breadcrumb. If the log ends here, the process
+    // died during the first paint — which is where femtovg creates its OpenGL
+    // context, and also where Slint builds the item tree and moves focus for the
+    // first time. A `!! PANIC` line right after this names the exact source
+    // location (that is how the AccessKit RefCell bug was found); no panic line
+    // at all means the process died in native code — check Event Viewer.
+    crate::diag::mark("main-window: entering event loop → first paint starts now (GL context is created HERE on the GPU path)");
+    let loop_result = window.run().context("event loop exited with error");
+    match &loop_result {
+        Ok(()) => crate::diag::mark("main-window: event loop returned normally (user closed the app)"),
+        Err(err) => crate::diag::mark(&format!("main-window: event loop returned Err — {err:#}")),
+    }
+    loop_result?;
     Ok(())
 }
 
@@ -3091,7 +3242,10 @@ fn unlock_config(locked: LockedStore) -> Result<Option<ConfigStore>> {
     {
         UNLOCK_SIZING.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    crate::diag::mark("unlock-window: UnlockWindow::new()"); // #diag-switch
     let win = UnlockWindow::new().context("failed to build unlock window")?;
+    crate::diag::mark("unlock-window: UnlockWindow::new() OK"); // #diag-switch
+
     // Frameless + self-drawn titlebar on *every* platform, including macOS. A
     // native-framed unlock window on macOS shows the OS traffic-light buttons
     // (close/min/max) a frame before Slint paints the card — setup_macos_platform
@@ -3237,7 +3391,13 @@ fn unlock_config(locked: LockedStore) -> Result<Option<ConfigStore>> {
     // (偏左). No pre-show window manipulation is needed here. MUST stay in sync with
     // `preferred-width` / `preferred-height` in unlock_window.slint.
 
+    // #diag-switch: the unlock window is small and paints first, so it often
+    // survives where the main window dies. Its own first paint also needs the GL
+    // context on the GPU path.
+    crate::diag::mark("unlock-window: entering event loop → first paint starts now");
     win.run().context("unlock event loop exited with error")?;
+    crate::diag::mark("unlock-window: event loop returned (password accepted, or user quit)"); // #diag-switch
+
     // Release the unlock window (and its wallpaper texture) before the main
     // window is built, so the two never coexist.
     drop(win);

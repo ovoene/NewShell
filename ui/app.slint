@@ -577,6 +577,12 @@ export component AppWindow inherits Window {
     // Always ask where to save on each download (#87); default off.
     in-out property <bool> download-always-ask: false;
     callback set-download-always-ask(bool);        // apply + persist
+    // Diagnostics log (#diag-switch); default off — the app writes no logs unless
+    // the user turns this on to chase a problem. The path is supplied by Rust.
+    in-out property <bool> diag-log: false;
+    in property <string> diag-log-path;
+    callback set-diag-log(bool);                   // apply + persist
+    callback open-diag-log-dir();
     // Collapse-by-default settings + shared SFTP collapse state (#78).
     in-out property <bool> collapse-sidebar-default: false;
     callback set-collapse-sidebar-default(bool);   // apply + persist
@@ -4292,6 +4298,8 @@ export component AppWindow inherits Window {
                     collapse-sftp-default <=> root.collapse-sftp-default;
                     sync-upload-enabled <=> root.sync-upload-enabled;
                     download-always-ask <=> root.download-always-ask;
+                    diag-log <=> root.diag-log;
+                    diag-log-path: root.diag-log-path;
                     welcome-as-sidebar <=> root.welcome-as-sidebar;
                     quick-commands-as-sidebar <=> root.quick-commands-as-sidebar;
                     wallpaper-overlay <=> root.wallpaper-overlay;
@@ -4326,6 +4334,8 @@ export component AppWindow inherits Window {
                     set-collapse-sftp-default(v) => { root.set-collapse-sftp-default(v); }
                     set-sync-upload-enabled(v) => { root.set-sync-upload-enabled(v); }
                     set-download-always-ask(v) => { root.set-download-always-ask(v); }
+                    set-diag-log(v) => { root.set-diag-log(v); }
+                    open-diag-log-dir() => { root.open-diag-log-dir(); }
                     set-welcome-as-sidebar(v) => { root.set-welcome-as-sidebar(v); }
                     set-quick-commands-as-sidebar(v) => {
                         root.quick-commands-as-sidebar = v;

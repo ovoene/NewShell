@@ -5,6 +5,8 @@
 
 mod app;
 mod config;
+// Opt-in startup diagnostics, off by default. See src/diag.rs.
+mod diag;
 mod dialog;
 mod i18n;
 mod layout;
@@ -50,6 +52,13 @@ fn main() -> anyhow::Result<()> {
     // Rendering (persisted as renderer_mode = "femtovg"), and SLINT_BACKEND=
     // winit-femtovg / winit-skia overrides the saved setting for one launch.
 
+    // Install the panic hook before anything else can crash. Costs nothing while
+    // the diagnostics switch is off (the default) — but once it is on, this is
+    // what turns a silent `panic = "abort"` into a named source location.
+    // Whether a log file is actually opened is decided in app::run(), once the
+    // config (which holds the switch) has been read (#diag-switch).
+    diag::install_panic_hook();
+
     init_tracing();
 
     // ── IME policy ───────────────────────────────────────────────────────────
@@ -67,12 +76,26 @@ fn main() -> anyhow::Result<()> {
     // are handled instead by the C0-marker + 3-layer Backspace filters in
     // `app::on_send_key`, so we no longer need (and must not use) ImmDisableIME.
 
-    app::run()
+    // Record how app::run() ended. Without this an early error (unwritable config
+    // dir, failed event loop) exits through stderr, which a
+    // `windows_subsystem = "windows"` binary has no way to show (#diag-switch).
+    diag::mark("main: entering app::run()");
+    let result = app::run();
+    match &result {
+        Ok(()) => diag::mark("main: app::run() returned Ok — clean exit"),
+        Err(err) => diag::mark(&format!("main: app::run() returned Err — {err:#}")),
+    }
+    result
 }
 
 /// Set up tracing: stderr only (honours RUST_LOG, default info). No on-disk log
 /// file is written — diagnostics go to stderr so they can be captured via
 /// `RUST_LOG` / console redirection if needed (#86).
+///
+/// A second layer mirrors events into `newshell-diag.log`, but ONLY while the
+/// diagnostics switch is on (Settings → Interface → Diagnostics). With the switch
+/// off — the default — its writer discards every byte without allocating, so the
+/// "never writes a log file" behaviour is preserved (#diag-switch).
 fn init_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
@@ -101,7 +124,39 @@ fn init_tracing() {
         .with_writer(std::io::stderr)
         .with_filter(env_filter);
 
+    // Mirror every event into newshell-diag.log, with extra verbosity for the
+    // window/GL stack — the layer most often implicated in startup failures.
+    // These crates log through `log`, which tracing-subscriber's log bridge
+    // forwards here, so e.g. glutin's GL-config failures become visible.
+    // EnvFilter is not Clone, hence the second instance. The layer stays
+    // registered permanently; `diag::MakeTracingWriter` throws the bytes away
+    // while the switch is off (#diag-switch).
+    fn verbose_window_stack(mut f: EnvFilter) -> EnvFilter {
+        for d in [
+            "glutin=debug",
+            "winit=debug",
+            "femtovg=debug",
+            "i_slint_core=debug",
+            "i_slint_backend_winit=debug",
+            "i_slint_renderer_femtovg=debug",
+            "i_slint_renderer_software=debug",
+        ] {
+            if let Ok(dir) = d.parse() {
+                f = f.add_directive(dir);
+            }
+        }
+        f
+    }
+    let diag_filter = verbose_window_stack(quiet_noise(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    ));
+    let diag_layer = fmt::layer()
+        .with_ansi(false)
+        .with_writer(diag::MakeTracingWriter)
+        .with_filter(diag_filter);
+
     tracing_subscriber::registry()
         .with(stderr_layer)
+        .with(diag_layer)
         .init();
 }

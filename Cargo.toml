@@ -1,6 +1,6 @@
 [package]
 name = "newshell"
-version = "8.8.16"
+version = "8.8.18"
 edition = "2021"
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"
@@ -8,7 +8,44 @@ readme = "README.md"
 rust-version = "1.75"
 
 [dependencies]
-slint = { version = "1.8", features = ["compat-1-2"] }
+# `default-features = false` exists for ONE reason: to drop Slint's default
+# `accessibility` feature. Every other default is re-listed verbatim below, so
+# nothing else changes.
+#
+# Why: `accessibility` sets the `enable_accesskit` cfg in i-slint-backend-winit,
+# which compiles in `WinitWindowAdapter::handle_focus_change`:
+#
+#     accesskit_adapter_cell.borrow_mut().handle_focus_item_change();
+#
+# That is a HARD borrow_mut with no re-entrancy guard, while AccessKit's own tree
+# walk (`rebuild_tree_of_dirty_nodes`) already holds that same RefCell borrowed
+# as it evaluates Slint properties. Anything that moves focus during the walk
+# re-enters the borrow and Slint panics with "RefCell already borrowed" — which,
+# under `panic = "abort"` in a `windows_subsystem = "windows"` binary, kills the
+# process instantly and completely silently. Seen on Windows 10 as "taskbar icon
+# appears, nothing ever paints, exits after ~5 s" (#win10 / #AccessKit).
+#
+# Slint guards the identical borrow with `try_borrow_mut` in the two sibling
+# hooks (`register_item_tree` / `unregister_item_tree`) and even documents the
+# re-entrancy there; `handle_focus_change` was simply missed. Fixed upstream on
+# master but in NO released 1.x — 1.17.1 still has the hard borrow — so bumping
+# the version is not a fix.
+#
+# Cost: the UI tree is no longer exposed to screen readers / UI Automation. That
+# path already aborted the process rather than working, so this trades a crash
+# for a feature that was never usable.
+#
+# IMPORTANT: `default-features = false` must be repeated on EVERY slint
+# declaration in this file (see the macOS and Windows target blocks below).
+# Cargo unions features across declarations, so a single declaration that keeps
+# its defaults switches `accessibility` back on for all of them.
+slint = { version = "1.8", default-features = false, features = [
+    "std",
+    "backend-default",
+    "renderer-femtovg",
+    "renderer-software",
+    "compat-1-2",
+] }
 # ICU4X (pulled in by Slint's text layout) spams stderr with raw `eprintln!`
 # ("ICU4X data error: No segmentation model for language: ja") because its
 # `log` shim falls back to eprintln when the `logging` feature is off. Turning
@@ -112,7 +149,10 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # Windows/Linux never compile Skia; on Windows it conflicts with another ICU
 # import library at link time when using the MSVC toolchain (#224).
 [target.'cfg(target_os = "macos")'.dependencies]
-slint = { version = "1.8", features = ["renderer-skia"] }
+# `default-features = false` mirrors the base declaration — see the accessibility
+# note there. Without it here, Cargo re-enables Slint's defaults (accessibility
+# included) for the whole graph.
+slint = { version = "1.8", default-features = false, features = ["renderer-skia"] }
 # Direct binding to the Objective-C runtime for macOS-only window placement. Pinned to 0.5.2 to
 # match the version `i-slint-backend-winit` (winit 0.30) already pulls in transitively, so cargo
 # reuses the locked copy instead of compiling a second major version. Used solely to send the
@@ -134,14 +174,21 @@ objc2-foundation = { version = "0.2.2", features = ["NSGeometry"] }
 # slint dependency). CRITICAL: without this, the config's "software" renderer_mode
 # — which is the DEFAULT for a fresh install — silently falls back to femtovg
 # (OpenGL/GPU). femtovg needs a working GL context; it comes up on GPU-capable
-# boxes (e.g. Windows Server 2019 test machines) but fails on many plain Win10
-# installs (weak/virtualized GPUs, stale drivers): the window + icon flash for a
-# few seconds, GL init fails, then `panic = "abort"` kills the process (#win10).
+# boxes (e.g. Windows Server 2019 test machines) but can fail on plain Win10
+# installs (weak/virtualized GPUs, stale drivers), and because `panic = "abort"`
+# leaves no chance to recover, a failed GL init would take the process down.
 # With renderer-software compiled in, "software" mode actually renders on CPU and
 # runs everywhere. femtovg stays available for users who opt into GPU rendering
 # under Settings -> Interface -> Rendering, or via SLINT_BACKEND=winit-femtovg.
+#
+# NOTE: the "icon flashes for ~5 s then exits" report that used to be blamed on GL
+# here turned out to be the AccessKit RefCell panic — see the accessibility note on
+# the base slint declaration. That crash happened with renderer_mode="software", so
+# GL was never involved. Keep both fixes; they are independent.
+#
+# `default-features = false` mirrors the base declaration and must stay in sync.
 [target.'cfg(windows)'.dependencies]
-slint = { version = "1.8", features = ["renderer-software"] }
+slint = { version = "1.8", default-features = false, features = ["renderer-software"] }
 
 [build-dependencies]
 slint-build = "1.8"
